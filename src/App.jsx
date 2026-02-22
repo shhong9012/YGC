@@ -610,6 +610,12 @@ function Dues({ data, up, mm }) {
 // ═══ MEMBERS ═══
 function MembersMgr({ data, up, mm }) {
   const [name, setName] = useState(""); const [tgt, setTgt] = useState("");
+  const [editId, setEditId] = useState(null); const [editTgt, setEditTgt] = useState("");
+  const saveTarget = (id) => {
+    const v = Number(editTgt);
+    if (v > 0) up((d) => { const x = d.members.find((y) => y.id === id); if (x) x.target = v; });
+    setEditId(null);
+  };
   const add = () => {
     if (!name.trim()) return;
     up((d) => { d.members.push({ id: d.nextMemberId++, name: name.trim(), target: tgt ? Number(tgt) : 95, nextTarget: null, active: true, duesPaid: false, goalAchieved: false }); });
@@ -633,7 +639,15 @@ function MembersMgr({ data, up, mm }) {
             <div key={m.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", borderRadius: 8, marginBottom: 4, background: m.active ? C.sf : C.bg, border: `1px solid ${m.active ? C.border : C.bg}`, opacity: m.active ? 1 : .4 }}>
               <div style={{ flex: 1 }}>
                 <span style={{ fontWeight: 600, fontSize: 12 }}>{m.name}</span>
-                <span style={{ marginLeft: 6, fontSize: 10, color: C.dim }}>목표 {m.target}타</span>
+                {editId === m.id ? (
+                  <input type="number" value={editTgt} autoFocus onChange={(e) => setEditTgt(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveTarget(m.id); if (e.key === "Escape") setEditId(null); }}
+                    onBlur={() => saveTarget(m.id)}
+                    style={{ marginLeft: 6, width: 50, padding: "2px 6px", background: C.card, border: `1px solid ${C.accent}`, borderRadius: 5, color: C.text, fontSize: 10, textAlign: "center" }} />
+                ) : (
+                  <span style={{ marginLeft: 6, fontSize: 10, color: C.dim, cursor: "pointer", borderBottom: `1px dashed ${C.dim}` }}
+                    onClick={() => { setEditId(m.id); setEditTgt(String(m.target)); }}>목표 {m.target}타</span>
+                )}
                 {info?.avg && <span style={{ marginLeft: 6, fontSize: 10, color: C.mid }}>avg {info.avg} · {info.played}R</span>}
                 {info?.bestScore && <span style={{ marginLeft: 6, fontSize: 10, color: C.accent }}>best {info.bestScore}</span>}
               </div>
