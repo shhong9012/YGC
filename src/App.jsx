@@ -164,11 +164,12 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
 
   const checkUserRole = useCallback(async (email) => {
-    const { data: row } = await supabase
+    const { data: row, error } = await supabase
       .from("allowed_users")
       .select("role")
       .eq("email", email)
       .single();
+    if (error) console.error("allowed_users query error:", error);
     return row?.role || null;
   }, []);
 
@@ -176,20 +177,28 @@ export default function App() {
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data: { session: s } }) => {
       setSession(s);
-      if (s?.user?.email) {
-        const role = await checkUserRole(s.user.email);
-        setUserRole(role);
+      try {
+        if (s?.user?.email) {
+          const role = await checkUserRole(s.user.email);
+          setUserRole(role);
+        }
+      } catch (err) {
+        console.error("Role check failed:", err);
       }
       setAuthLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
       setSession(s);
-      if (s?.user?.email) {
-        const role = await checkUserRole(s.user.email);
-        setUserRole(role);
-      } else {
-        setUserRole(null);
+      try {
+        if (s?.user?.email) {
+          const role = await checkUserRole(s.user.email);
+          setUserRole(role);
+        } else {
+          setUserRole(null);
+        }
+      } catch (err) {
+        console.error("Role check failed:", err);
       }
       setAuthLoading(false);
     });
