@@ -175,30 +175,36 @@ export default function App() {
 
   // Auth effect
   useEffect(() => {
+    console.log("[AUTH] init");
     supabase.auth.getSession().then(async ({ data: { session: s } }) => {
+      console.log("[AUTH] getSession:", s?.user?.email || "no session");
       setSession(s);
       try {
         if (s?.user?.email) {
           const role = await checkUserRole(s.user.email);
+          console.log("[AUTH] role:", role);
           setUserRole(role);
         }
       } catch (err) {
-        console.error("Role check failed:", err);
+        console.error("[AUTH] Role check failed:", err);
       }
       setAuthLoading(false);
+      console.log("[AUTH] authLoading → false");
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
+      console.log("[AUTH] onAuthStateChange:", event, s?.user?.email);
       setSession(s);
       try {
         if (s?.user?.email) {
           const role = await checkUserRole(s.user.email);
+          console.log("[AUTH] role (change):", role);
           setUserRole(role);
         } else {
           setUserRole(null);
         }
       } catch (err) {
-        console.error("Role check failed:", err);
+        console.error("[AUTH] Role check failed:", err);
       }
       setAuthLoading(false);
     });
