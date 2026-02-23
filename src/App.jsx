@@ -110,6 +110,46 @@ async function fetchAll() {
   };
 }
 
+// ═══ LOGIN SCREEN ═══
+function LoginScreen() {
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Outfit','Noto Sans KR',sans-serif", color: C.text, padding: 20 }}>
+      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+      <div style={{ width: 64, height: 64, borderRadius: 16, background: `linear-gradient(135deg,${C.accent},#059669)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, marginBottom: 16, boxShadow: `0 8px 24px rgba(16,185,129,0.3)` }}>🧢</div>
+      <h1 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 800 }}>ㄱㅈㅂ <span style={{ color: C.accent }}>GOLF LEAGUE</span></h1>
+      <p style={{ margin: "0 0 32px", fontSize: 12, color: C.dim }}>2026 SEASON · F1 CHAMPIONSHIP</p>
+      <button onClick={() => supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: "https://shhong9012.github.io/YGC/" } })}
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 28px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.card, color: C.text, fontSize: 14, fontWeight: 600, cursor: "pointer", transition: "all .15s" }}>
+        <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#34A853" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#FBBC05" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+        Google로 로그인
+      </button>
+    </div>
+  );
+}
+
+// ═══ ACCESS DENIED ═══
+function AccessDenied({ email }) {
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Outfit','Noto Sans KR',sans-serif", color: C.text, padding: 20, textAlign: "center" }}>
+      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+      <div style={{ fontSize: 48, marginBottom: 12 }}>🚫</div>
+      <h2 style={{ margin: "0 0 8px", fontSize: 18, fontWeight: 700, color: C.red }}>접근 권한 없음</h2>
+      <p style={{ margin: "0 0 4px", fontSize: 13, color: C.mid }}>{email}</p>
+      <p style={{ margin: "0 0 24px", fontSize: 12, color: C.dim }}>등록된 멤버만 접근할 수 있습니다.<br/>관리자에게 문의하세요.</p>
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={() => supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: "https://shhong9012.github.io/YGC/" } })}
+          style={{ padding: "10px 20px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.card, color: C.text, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+          다른 계정으로 로그인
+        </button>
+        <button onClick={() => supabase.auth.signOut()}
+          style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: C.redDim, color: C.red, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+          로그아웃
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ═══ MAIN APP ═══
 export default function App() {
   const [data, setData] = useState({ members: [], rounds: [], hatHolder: null, hatSince: null, season: 2026 });
@@ -117,6 +157,47 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
   const refetchTimer = useRef(null);
+
+  // Auth state
+  const [session, setSession] = useState(null);
+  const [userRole, setUserRole] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  const checkUserRole = useCallback(async (email) => {
+    const { data: row } = await supabase
+      .from("allowed_users")
+      .select("role")
+      .eq("email", email)
+      .single();
+    return row?.role || null;
+  }, []);
+
+  // Auth effect
+  useEffect(() => {
+    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
+      setSession(s);
+      if (s?.user?.email) {
+        const role = await checkUserRole(s.user.email);
+        setUserRole(role);
+      }
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
+      setSession(s);
+      if (s?.user?.email) {
+        const role = await checkUserRole(s.user.email);
+        setUserRole(role);
+      } else {
+        setUserRole(null);
+      }
+      setAuthLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, [checkUserRole]);
+
+  const isAdmin = userRole === "admin";
 
   const refetch = useCallback(async () => {
     try {
@@ -134,15 +215,17 @@ export default function App() {
     refetchTimer.current = setTimeout(() => refetch(), 300);
   }, [refetch]);
 
-  // Initial load
+  // Initial load — only after auth confirmed
   useEffect(() => {
+    if (!userRole) return;
     fetchAll()
       .then((d) => { setData(d); setReady(true); setError(null); })
       .catch((err) => { console.error(err); setError(err.message); setReady(true); });
-  }, []);
+  }, [userRole]);
 
-  // Realtime subscription
+  // Realtime subscription — only after auth confirmed
   useEffect(() => {
+    if (!userRole) return;
     const tables = ["members", "rounds", "round_attendees", "scores", "cart_teams", "awards", "hat_history", "settings", "expenses"];
     let channel = supabase.channel("db-sync");
     tables.forEach((t) => {
@@ -150,11 +233,12 @@ export default function App() {
     });
     channel.subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [debouncedRefetch]);
+  }, [userRole, debouncedRefetch]);
 
   // ═══ DB Mutation Functions ═══
   const db = useMemo(() => ({
     updateMember: async (id, fields) => {
+      if (!isAdmin) return;
       // Optimistic
       setData((prev) => {
         const next = JSON.parse(JSON.stringify(prev));
@@ -171,6 +255,7 @@ export default function App() {
     },
 
     addMember: async (name, target) => {
+      if (!isAdmin) return;
       const { data: ins } = await supabase
         .from("members")
         .insert({ name, target_score: target, next_target: null })
@@ -189,6 +274,7 @@ export default function App() {
     },
 
     saveRound: async ({ date, course, attendees, scores, cartTeams, awards, worstScorer }) => {
+      if (!isAdmin) return;
       const { data: round } = await supabase
         .from("rounds")
         .insert({ date, course })
@@ -249,6 +335,7 @@ export default function App() {
     },
 
     addExpense: async (roundId, category, itemName, amount) => {
+      if (!isAdmin) return;
       await supabase.from("expenses").insert({
         round_id: roundId, category, item_name: itemName, amount,
       });
@@ -256,12 +343,13 @@ export default function App() {
     },
 
     deleteExpense: async (expenseId) => {
+      if (!isAdmin) return;
       await supabase.from("expenses").delete().eq("id", expenseId);
       await refetch();
     },
 
     refetch,
-  }), [refetch]);
+  }), [refetch, isAdmin]);
 
   // ═══ Computed ═══
   const mm = useMemo(() => {
@@ -304,6 +392,11 @@ export default function App() {
     return att;
   }, [data]);
 
+  // Auth guards
+  if (authLoading) return <div style={{ background: C.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontFamily: "'Outfit', sans-serif" }}>로딩 중...</div>;
+  if (!session) return <LoginScreen />;
+  if (!userRole) return <AccessDenied email={session.user?.email} />;
+
   if (!ready) return <div style={{ background: C.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontFamily: "'Outfit', sans-serif" }}>로딩 중...</div>;
 
   if (error) return (
@@ -329,9 +422,19 @@ export default function App() {
       <header style={{ background: `linear-gradient(135deg,#0f1a12,#111827,#0f1520)`, padding: "16px 16px 12px", borderBottom: `1px solid ${C.border}` }}>
         <div style={{ maxWidth: 960, margin: "0 auto", display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 38, height: 38, borderRadius: 10, background: `linear-gradient(135deg,${C.accent},#059669)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: `0 4px 12px rgba(16,185,129,0.3)` }}>🧢</div>
-          <div>
+          <div style={{ flex: 1 }}>
             <h1 style={{ margin: 0, fontSize: 17, fontWeight: 800, letterSpacing: -0.5 }}>ㄱㅈㅂ <span style={{ color: C.accent }}>GOLF LEAGUE</span></h1>
             <p style={{ margin: 0, fontSize: 10, color: C.dim, letterSpacing: 1 }}>{data.season} SEASON · F1 CHAMPIONSHIP · 매월 셋째 화 태광CC</p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 10, color: C.mid, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.user?.email}</div>
+              {isAdmin && <span style={{ fontSize: 9, color: C.gold, background: `${C.gold}20`, padding: "1px 6px", borderRadius: 4, fontWeight: 700 }}>관리자</span>}
+            </div>
+            <button onClick={() => supabase.auth.signOut()}
+              style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.sf, color: C.mid, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap" }}>
+              로그아웃
+            </button>
           </div>
         </div>
       </header>
@@ -352,12 +455,12 @@ export default function App() {
 
       <main style={{ maxWidth: 960, margin: "0 auto", padding: "14px 12px" }}>
         {tab === "standings" && <Standings data={data} mm={mm} standings={standings} />}
-        {tab === "round" && <RoundMgr data={data} db={db} mm={mm} />}
+        {tab === "round" && <RoundMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
         {tab === "hat" && <HatTracker data={data} mm={mm} />}
         {tab === "attend" && <Attendance data={data} mm={mm} attendance={attendance} />}
-        {tab === "dues" && <Dues data={data} db={db} mm={mm} />}
-        {tab === "expenses" && <ExpensesMgr data={data} db={db} mm={mm} />}
-        {tab === "members" && <MembersMgr data={data} db={db} mm={mm} />}
+        {tab === "dues" && <Dues data={data} db={db} mm={mm} isAdmin={isAdmin} />}
+        {tab === "expenses" && <ExpensesMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
+        {tab === "members" && <MembersMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
         {tab === "rules" && <Rules />}
       </main>
     </div>
@@ -459,7 +562,7 @@ function Standings({ data, mm, standings }) {
 }
 
 // ═══ ROUND MANAGER ═══
-function RoundMgr({ data, db, mm }) {
+function RoundMgr({ data, db, mm, isAdmin }) {
   const [date, setDate] = useState(""); const [course, setCourse] = useState("태광CC");
   const [sel, setSel] = useState([]); const [scores, setScores] = useState({});
   const [awards, setAwards] = useState([]); const [awName, setAwName] = useState(""); const [awWinner, setAwWinner] = useState("");
@@ -563,6 +666,29 @@ function RoundMgr({ data, db, mm }) {
       setSaving(false);
     }
   };
+
+  // Past rounds view (shared between admin and viewer)
+  const pastRoundsView = (
+    <Card title="📜 지난 월례회">
+      {[...data.rounds].reverse().slice(0, 5).map((r) => {
+        const sorted = r.scores ? [...r.scores].sort((a, b) => a.score - b.score) : [];
+        return (
+          <div key={r.id} style={{ padding: 10, background: C.sf, borderRadius: 8, marginBottom: 6, border: `1px solid ${C.border}` }}>
+            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>R{r.id} · {r.date} · {r.course}</div>
+            {sorted.map((s, i) => (
+              <div key={s.id} style={{ display: "flex", gap: 6, fontSize: 11, padding: "2px 0" }}>
+                <Medal rank={i + 1} /><span style={{ flex: 1 }}>{mm[s.id]?.name}</span><span style={{ color: C.mid }}>{s.score}타</span>
+                <span style={{ fontWeight: 700, color: getPts(i + 1) > 0 ? C.accent : C.dim, minWidth: 24, textAlign: "right" }}>{getPts(i + 1) > 0 ? `+${getPts(i + 1)}` : "-"}</span>
+              </div>
+            ))}
+            {r.awards?.length > 0 && <div style={{ marginTop: 4, fontSize: 10, color: C.gold }}>🏆 {r.awards.map((a) => `${a.name}:${a.winner}`).join(" · ")}</div>}
+          </div>
+        );
+      })}
+    </Card>
+  );
+
+  if (!isAdmin) return <div>{pastRoundsView}</div>;
 
   return (
     <div>
@@ -715,23 +841,7 @@ function RoundMgr({ data, db, mm }) {
           <Btn onClick={save} disabled={saving} style={{ flex: 2, padding: 12, fontSize: 14 }}>{saving ? "저장 중..." : "✅ 월례회 저장"}</Btn>
         </div>
 
-        <Card title="📜 지난 월례회">
-          {[...data.rounds].reverse().slice(0, 5).map((r) => {
-            const sorted = r.scores ? [...r.scores].sort((a, b) => a.score - b.score) : [];
-            return (
-              <div key={r.id} style={{ padding: 10, background: C.sf, borderRadius: 8, marginBottom: 6, border: `1px solid ${C.border}` }}>
-                <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>R{r.id} · {r.date} · {r.course}</div>
-                {sorted.map((s, i) => (
-                  <div key={s.id} style={{ display: "flex", gap: 6, fontSize: 11, padding: "2px 0" }}>
-                    <Medal rank={i + 1} /><span style={{ flex: 1 }}>{mm[s.id]?.name}</span><span style={{ color: C.mid }}>{s.score}타</span>
-                    <span style={{ fontWeight: 700, color: getPts(i + 1) > 0 ? C.accent : C.dim, minWidth: 24, textAlign: "right" }}>{getPts(i + 1) > 0 ? `+${getPts(i + 1)}` : "-"}</span>
-                  </div>
-                ))}
-                {r.awards?.length > 0 && <div style={{ marginTop: 4, fontSize: 10, color: C.gold }}>🏆 {r.awards.map((a) => `${a.name}:${a.winner}`).join(" · ")}</div>}
-              </div>
-            );
-          })}
-        </Card>
+        {pastRoundsView}
       </>)}
     </div>
   );
@@ -842,7 +952,7 @@ function Attendance({ data, mm, attendance }) {
 }
 
 // ═══ DUES MANAGEMENT ═══
-function Dues({ data, db, mm }) {
+function Dues({ data, db, mm, isAdmin }) {
   const activeMembers = data.members.filter((m) => m.active);
   const totalDues = activeMembers.filter((m) => m.duesPaid).length * DUES;
   const totalRefund = activeMembers.filter((m) => m.goalAchieved).length * GOAL_REFUND;
@@ -868,14 +978,26 @@ function Dues({ data, db, mm }) {
                 <span style={{ flex: 1, fontSize: 12, fontWeight: 500 }}>{m.name}</span>
                 <span style={{ fontSize: 10, color: C.dim }}>목표 {m.target}타{m.target <= 85 ? "이하" : "미만"}</span>
                 {info?.bestScore && <span style={{ fontSize: 10, color: achieved ? C.accent : C.mid }}>최저 {info.bestScore}타</span>}
-                <button onClick={() => db.updateMember(m.id, { duesPaid: !m.duesPaid })}
-                  style={{ padding: "3px 8px", borderRadius: 5, border: "none", cursor: "pointer", fontSize: 10, fontWeight: 600, background: m.duesPaid ? C.accentDim : C.redDim, color: m.duesPaid ? C.accent : C.red }}>
-                  {m.duesPaid ? "납입✓" : "미납"}
-                </button>
-                <button onClick={() => db.updateMember(m.id, { goalAchieved: !m.goalAchieved })}
-                  style={{ padding: "3px 8px", borderRadius: 5, border: "none", cursor: "pointer", fontSize: 10, fontWeight: 600, background: m.goalAchieved ? C.gold + "20" : C.sf, color: m.goalAchieved ? C.gold : C.dim }}>
-                  {m.goalAchieved ? "달성🎉" : "미달성"}
-                </button>
+                {isAdmin ? (
+                  <button onClick={() => db.updateMember(m.id, { duesPaid: !m.duesPaid })}
+                    style={{ padding: "3px 8px", borderRadius: 5, border: "none", cursor: "pointer", fontSize: 10, fontWeight: 600, background: m.duesPaid ? C.accentDim : C.redDim, color: m.duesPaid ? C.accent : C.red }}>
+                    {m.duesPaid ? "납입✓" : "미납"}
+                  </button>
+                ) : (
+                  <span style={{ padding: "3px 8px", borderRadius: 5, fontSize: 10, fontWeight: 600, background: m.duesPaid ? C.accentDim : C.redDim, color: m.duesPaid ? C.accent : C.red }}>
+                    {m.duesPaid ? "납입✓" : "미납"}
+                  </span>
+                )}
+                {isAdmin ? (
+                  <button onClick={() => db.updateMember(m.id, { goalAchieved: !m.goalAchieved })}
+                    style={{ padding: "3px 8px", borderRadius: 5, border: "none", cursor: "pointer", fontSize: 10, fontWeight: 600, background: m.goalAchieved ? C.gold + "20" : C.sf, color: m.goalAchieved ? C.gold : C.dim }}>
+                    {m.goalAchieved ? "달성🎉" : "미달성"}
+                  </button>
+                ) : (
+                  <span style={{ padding: "3px 8px", borderRadius: 5, fontSize: 10, fontWeight: 600, background: m.goalAchieved ? C.gold + "20" : C.sf, color: m.goalAchieved ? C.gold : C.dim }}>
+                    {m.goalAchieved ? "달성🎉" : "미달성"}
+                  </span>
+                )}
               </div>
             );
           })}
@@ -886,7 +1008,7 @@ function Dues({ data, db, mm }) {
 }
 
 // ═══ MEMBERS ═══
-function MembersMgr({ data, db, mm }) {
+function MembersMgr({ data, db, mm, isAdmin }) {
   const [name, setName] = useState(""); const [tgt, setTgt] = useState("");
   const [editId, setEditId] = useState(null); const [editTgt, setEditTgt] = useState("");
 
@@ -904,15 +1026,17 @@ function MembersMgr({ data, db, mm }) {
 
   return (
     <div>
-      <Card title="👥 멤버 추가 (제7,8조: 80% 찬성 필요)">
-        <div style={{ display: "flex", gap: 6 }}>
-          <input placeholder="이름" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()}
-            style={{ flex: 2, padding: "8px 10px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
-          <input placeholder="목표타수" type="number" value={tgt} onChange={(e) => setTgt(e.target.value)}
-            style={{ flex: 1, padding: "8px 10px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
-          <Btn onClick={add}>추가</Btn>
-        </div>
-      </Card>
+      {isAdmin && (
+        <Card title="👥 멤버 추가 (제7,8조: 80% 찬성 필요)">
+          <div style={{ display: "flex", gap: 6 }}>
+            <input placeholder="이름" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()}
+              style={{ flex: 2, padding: "8px 10px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
+            <input placeholder="목표타수" type="number" value={tgt} onChange={(e) => setTgt(e.target.value)}
+              style={{ flex: 1, padding: "8px 10px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
+            <Btn onClick={add}>추가</Btn>
+          </div>
+        </Card>
+      )}
       <Card title={`멤버 목록`} badge={`${data.members.length}명`}>
         {data.members.map((m) => {
           const info = mm[m.id];
@@ -920,21 +1044,23 @@ function MembersMgr({ data, db, mm }) {
             <div key={m.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", borderRadius: 8, marginBottom: 4, background: m.active ? C.sf : C.bg, border: `1px solid ${m.active ? C.border : C.bg}`, opacity: m.active ? 1 : .4 }}>
               <div style={{ flex: 1 }}>
                 <span style={{ fontWeight: 600, fontSize: 12 }}>{m.name}</span>
-                {editId === m.id ? (
+                {isAdmin && editId === m.id ? (
                   <input type="number" value={editTgt} autoFocus onChange={(e) => setEditTgt(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") saveTarget(m.id); if (e.key === "Escape") setEditId(null); }}
                     onBlur={() => saveTarget(m.id)}
                     style={{ marginLeft: 6, width: 50, padding: "2px 6px", background: C.card, border: `1px solid ${C.accent}`, borderRadius: 5, color: C.text, fontSize: 10, textAlign: "center" }} />
                 ) : (
-                  <span style={{ marginLeft: 6, fontSize: 10, color: C.dim, cursor: "pointer", borderBottom: `1px dashed ${C.dim}` }}
-                    onClick={() => { setEditId(m.id); setEditTgt(String(m.target)); }}>목표 {m.target}타</span>
+                  <span style={{ marginLeft: 6, fontSize: 10, color: C.dim, ...(isAdmin ? { cursor: "pointer", borderBottom: `1px dashed ${C.dim}` } : {}) }}
+                    onClick={isAdmin ? () => { setEditId(m.id); setEditTgt(String(m.target)); } : undefined}>목표 {m.target}타</span>
                 )}
                 {info?.avg && <span style={{ marginLeft: 6, fontSize: 10, color: C.mid }}>avg {info.avg} · {info.played}R</span>}
                 {info?.bestScore && <span style={{ marginLeft: 6, fontSize: 10, color: C.accent }}>best {info.bestScore}</span>}
               </div>
-              <div style={{ display: "flex", gap: 4 }}>
-                <Btn ghost color={m.active ? C.accent : C.dim} onClick={() => db.updateMember(m.id, { active: !m.active })} style={{ padding: "3px 8px", fontSize: 10 }}>{m.active ? "활동" : "휴면"}</Btn>
-              </div>
+              {isAdmin && (
+                <div style={{ display: "flex", gap: 4 }}>
+                  <Btn ghost color={m.active ? C.accent : C.dim} onClick={() => db.updateMember(m.id, { active: !m.active })} style={{ padding: "3px 8px", fontSize: 10 }}>{m.active ? "활동" : "휴면"}</Btn>
+                </div>
+              )}
             </div>
           );
         })}
@@ -944,7 +1070,7 @@ function MembersMgr({ data, db, mm }) {
 }
 
 // ═══ EXPENSES MANAGER ═══
-function ExpensesMgr({ data, db, mm }) {
+function ExpensesMgr({ data, db, mm, isAdmin }) {
   const [selRound, setSelRound] = useState("");
   const [category, setCategory] = useState("");
   const [itemName, setItemName] = useState("");
@@ -1030,7 +1156,7 @@ function ExpensesMgr({ data, db, mm }) {
                     <span style={{ fontSize: 10, color: C.mid, minWidth: 36 }}>{cat?.label || e.category}</span>
                     <span style={{ flex: 1, fontWeight: 500 }}>{e.itemName}</span>
                     <span style={{ fontWeight: 600 }}>{fmtW(e.amount)}</span>
-                    <button onClick={() => db.deleteExpense(e.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 14, padding: "0 4px" }}>✕</button>
+                    {isAdmin && <button onClick={() => db.deleteExpense(e.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 14, padding: "0 4px" }}>✕</button>}
                   </div>
                 );
               })}
@@ -1038,19 +1164,21 @@ function ExpensesMgr({ data, db, mm }) {
           )}
 
           {/* 항목 추가 폼 */}
-          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-            <select value={category} onChange={(e) => setCategory(e.target.value)}
-              style={{ flex: "1 1 80px", minWidth: 80, padding: "7px 8px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }}>
-              <option value="">카테고리</option>
-              {EXPENSE_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.icon} {c.label}</option>)}
-            </select>
-            <input placeholder="항목명" value={itemName} onChange={(e) => setItemName(e.target.value)}
-              style={{ flex: "2 1 100px", minWidth: 80, padding: "7px 8px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
-            <input type="number" placeholder="금액" value={amount} onChange={(e) => setAmount(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAdd()}
-              style={{ flex: "1 1 80px", minWidth: 70, padding: "7px 8px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12, textAlign: "right" }} />
-            <Btn onClick={handleAdd} style={{ padding: "7px 14px" }}>+ 추가</Btn>
-          </div>
+          {isAdmin && (
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+              <select value={category} onChange={(e) => setCategory(e.target.value)}
+                style={{ flex: "1 1 80px", minWidth: 80, padding: "7px 8px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }}>
+                <option value="">카테고리</option>
+                {EXPENSE_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.icon} {c.label}</option>)}
+              </select>
+              <input placeholder="항목명" value={itemName} onChange={(e) => setItemName(e.target.value)}
+                style={{ flex: "2 1 100px", minWidth: 80, padding: "7px 8px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
+              <input type="number" placeholder="금액" value={amount} onChange={(e) => setAmount(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+                style={{ flex: "1 1 80px", minWidth: 70, padding: "7px 8px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12, textAlign: "right" }} />
+              <Btn onClick={handleAdd} style={{ padding: "7px 14px" }}>+ 추가</Btn>
+            </div>
+          )}
         </Card>
       )}
 
