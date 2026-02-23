@@ -88,14 +88,17 @@ export default function App() {
   const [data, setData] = useState({ members: [], rounds: [], hatHolder: null, hatSince: null, season: 2026 });
   const [tab, setTab] = useState("standings");
   const [ready, setReady] = useState(false);
+  const [error, setError] = useState(null);
   const refetchTimer = useRef(null);
 
   const refetch = useCallback(async () => {
     try {
       const d = await fetchAll();
       setData(d);
+      setError(null);
     } catch (err) {
       console.error("Fetch error:", err);
+      setError(err.message);
     }
   }, []);
 
@@ -107,8 +110,8 @@ export default function App() {
   // Initial load
   useEffect(() => {
     fetchAll()
-      .then((d) => { setData(d); setReady(true); })
-      .catch((err) => { console.error(err); setReady(true); });
+      .then((d) => { setData(d); setReady(true); setError(null); })
+      .catch((err) => { console.error(err); setError(err.message); setReady(true); });
   }, []);
 
   // Realtime subscription
@@ -263,6 +266,16 @@ export default function App() {
   }, [data]);
 
   if (!ready) return <div style={{ background: C.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontFamily: "'Outfit', sans-serif" }}>로딩 중...</div>;
+
+  if (error) return (
+    <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: C.red, fontFamily: "'Outfit', sans-serif", padding: 20, textAlign: "center" }}>
+      <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+      <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>서버 연결 실패</div>
+      <div style={{ fontSize: 12, color: C.mid, marginBottom: 16 }}>{error}</div>
+      <button onClick={() => { setError(null); setReady(false); fetchAll().then((d) => { setData(d); setReady(true); setError(null); }).catch((e) => { setError(e.message); setReady(true); }); }}
+        style={{ padding: "10px 24px", borderRadius: 8, border: "none", background: C.accent, color: "#000", fontWeight: 600, cursor: "pointer" }}>다시 시도</button>
+    </div>
+  );
 
   return (
     <div style={{ background: C.bg, minHeight: "100vh", fontFamily: "'Outfit','Noto Sans KR',sans-serif", color: C.text }}>
