@@ -173,44 +173,32 @@ export default function App() {
     return row?.role || null;
   }, []);
 
-  // Auth effect
+  // Auth listener — session만 추적 (DB 호출 금지)
   useEffect(() => {
-    console.log("[AUTH] init");
-    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
-      console.log("[AUTH] getSession:", s?.user?.email || "no session");
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
       setSession(s);
-      try {
-        if (s?.user?.email) {
-          const role = await checkUserRole(s.user.email);
-          console.log("[AUTH] role:", role);
-          setUserRole(role);
-        }
-      } catch (err) {
-        console.error("[AUTH] Role check failed:", err);
-      }
-      setAuthLoading(false);
-      console.log("[AUTH] authLoading → false");
+      if (!s) setAuthLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
-      console.log("[AUTH] onAuthStateChange:", event, s?.user?.email);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
       setSession(s);
-      try {
-        if (s?.user?.email) {
-          const role = await checkUserRole(s.user.email);
-          console.log("[AUTH] role (change):", role);
-          setUserRole(role);
-        } else {
-          setUserRole(null);
-        }
-      } catch (err) {
-        console.error("[AUTH] Role check failed:", err);
-      }
-      setAuthLoading(false);
+      if (!s) { setUserRole(null); setAuthLoading(false); }
     });
 
     return () => subscription.unsubscribe();
-  }, [checkUserRole]);
+  }, []);
+
+  // Role 조회 — session 변경 시 별도 effect에서 실행
+  useEffect(() => {
+    if (!session?.user?.email) return;
+    checkUserRole(session.user.email).then((role) => {
+      setUserRole(role);
+      setAuthLoading(false);
+    }).catch(() => {
+      setUserRole(null);
+      setAuthLoading(false);
+    });
+  }, [session, checkUserRole]);
 
   const isAdmin = userRole === "admin";
 
