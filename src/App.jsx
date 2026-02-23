@@ -169,7 +169,7 @@ export default function App() {
       .select("role")
       .eq("email", email)
       .single();
-    if (error) console.error("allowed_users query error:", error);
+    if (error) console.error("allowed_users query:", error.message);
     return row?.role || null;
   }, []);
 
