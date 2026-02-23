@@ -1,36 +1,17 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { supabase } from "./lib/supabase";
 
-const STORAGE_KEY = "gjb-golf-league-v3";
-
-// ═══ MEMBERS & RULES from 정관(251119) ═══
-const INITIAL_MEMBERS = [
-  { id: 1, name: "이희진", target: 85, nextTarget: 80 },
-  { id: 2, name: "최영근", target: 85, nextTarget: 80 },
-  { id: 3, name: "홍석환", target: 85, nextTarget: 80 },
-  { id: 4, name: "조동훈", target: 80, nextTarget: 75 },
-  { id: 5, name: "최성현", target: 85, nextTarget: 80 },
-  { id: 6, name: "박시환", target: 90, nextTarget: 95 },
-  { id: 7, name: "박인혁", target: 90, nextTarget: 85 },
-  { id: 8, name: "문민구", target: 75, nextTarget: null },
-  { id: 9, name: "김산", target: 85, nextTarget: 80 },
-  { id: 10, name: "이민규", target: 80, nextTarget: 75 },
-  { id: 11, name: "강석훈", target: 85, nextTarget: 80 },
-  { id: 12, name: "송영섭", target: 95, nextTarget: 90 },
-  { id: 13, name: "장주홍", target: 95, nextTarget: 90 },
-  { id: 14, name: "정승윤", target: 95, nextTarget: 90 },
-];
-
+// ═══ RULES from 정관(251119) ═══
 const F1 = [
   { rank: 1, pts: 25 }, { rank: 2, pts: 18 }, { rank: 3, pts: 15 },
   { rank: 4, pts: 12 }, { rank: 5, pts: 10 }, { rank: 6, pts: 8 },
 ];
 const getPts = (r) => F1.find((f) => f.rank === r)?.pts || 0;
 
-// 월례회 months (제10조)
 const ACTIVE_MONTHS = [3, 4, 5, 6, 8, 9, 10, 11];
 const REQUIRED_ATTENDANCE = 5;
-const DUES = 1500000; // 150만원
-const GOAL_REFUND = 500000; // 50만원
+const DUES = 1500000;
+const GOAL_REFUND = 500000;
 
 const C = {
   bg: "#0a0e17", sf: "#111827", card: "#1a2235", cardAlt: "#1e2a40",
@@ -47,13 +28,6 @@ const C = {
 const fmt = (n) => n?.toLocaleString("ko-KR") ?? "-";
 const fmtW = (n) => `₩${fmt(n)}`;
 
-const defaultData = () => ({
-  members: INITIAL_MEMBERS.map((m) => ({ ...m, active: true, duesPaid: false, goalAchieved: false })),
-  rounds: [],
-  hatHolder: null, hatSince: null,
-  season: 2026, nextRoundId: 1, nextMemberId: 15,
-});
-
 const TABS = [
   { id: "standings", label: "챔피언십", icon: "🏆" },
   { id: "round", label: "월례회", icon: "⛳" },
@@ -64,27 +38,190 @@ const TABS = [
   { id: "rules", label: "정관", icon: "📜" },
 ];
 
+// ═══ SUPABASE DATA LAYER ═══
+async function fetchAll() {
+  const [
+    { data: members },
+    { data: rounds },
+    { data: attendees },
+    { data: scoresData },
+    { data: cartTeamsData },
+    { data: awardsData },
+    { data: settingsData },
+  ] = await Promise.all([
+    supabase.from("members").select("*").order("id"),
+    supabase.from("rounds").select("*").order("id"),
+    supabase.from("round_attendees").select("*"),
+    supabase.from("scores").select("*"),
+    supabase.from("cart_teams").select("*"),
+    supabase.from("awards").select("*"),
+    supabase.from("settings").select("*"),
+  ]);
+
+  const settingsMap = {};
+  (settingsData || []).forEach((s) => { settingsMap[s.key] = s.value; });
+
+  const roundList = (rounds || []).map((r) => {
+    const rAtt = (attendees || []).filter((a) => a.round_id === r.id).map((a) => a.member_id);
+    const rScores = (scoresData || []).filter((s) => s.round_id === r.id).map((s) => ({ id: s.member_id, score: s.score }));
+    const rCarts = (cartTeamsData || []).filter((c) => c.round_id === r.id);
+    const cartNums = [...new Set(rCarts.map((c) => c.cart_number))].sort((a, b) => a - b);
+    const carts = cartNums.map((n) => rCarts.filter((c) => c.cart_number === n).map((c) => c.member_id));
+    const rAwards = (awardsData || []).filter((a) => a.round_id === r.id).map((a) => ({ name: a.award_type, winner: a.winner_name }));
+    return { id: r.id, date: r.date, course: r.course, attendees: rAtt, scores: rScores, cartTeams: carts, awards: rAwards };
+  });
+
+  return {
+    members: (members || []).map((m) => ({
+      id: m.id, name: m.name, target: m.target_score, nextTarget: m.next_target,
+      active: m.active, duesPaid: m.dues_paid, goalAchieved: m.goal_achieved,
+    })),
+    rounds: roundList,
+    hatHolder: settingsMap.hat_holder ?? null,
+    hatSince: settingsMap.hat_since ?? null,
+    season: settingsMap.season ? Number(settingsMap.season) : 2026,
+  };
+}
+
 // ═══ MAIN APP ═══
 export default function App() {
-  const [data, setData] = useState(defaultData);
+  const [data, setData] = useState({ members: [], rounds: [], hatHolder: null, hatSince: null, season: 2026 });
   const [tab, setTab] = useState("standings");
   const [ready, setReady] = useState(false);
+  const refetchTimer = useRef(null);
 
-  useEffect(() => {
+  const refetch = useCallback(async () => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) setData(JSON.parse(saved));
-    } catch {}
-    setReady(true);
+      const d = await fetchAll();
+      setData(d);
+    } catch (err) {
+      console.error("Fetch error:", err);
+    }
   }, []);
 
+  const debouncedRefetch = useCallback(() => {
+    if (refetchTimer.current) clearTimeout(refetchTimer.current);
+    refetchTimer.current = setTimeout(() => refetch(), 300);
+  }, [refetch]);
+
+  // Initial load
   useEffect(() => {
-    if (!ready) return;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
-  }, [data, ready]);
+    fetchAll()
+      .then((d) => { setData(d); setReady(true); })
+      .catch((err) => { console.error(err); setReady(true); });
+  }, []);
 
-  const up = useCallback((fn) => setData((p) => { const n = JSON.parse(JSON.stringify(p)); fn(n); return n; }), []);
+  // Realtime subscription
+  useEffect(() => {
+    const tables = ["members", "rounds", "round_attendees", "scores", "cart_teams", "awards", "hat_history", "settings"];
+    let channel = supabase.channel("db-sync");
+    tables.forEach((t) => {
+      channel = channel.on("postgres_changes", { event: "*", schema: "public", table: t }, () => debouncedRefetch());
+    });
+    channel.subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [debouncedRefetch]);
 
+  // ═══ DB Mutation Functions ═══
+  const db = useMemo(() => ({
+    updateMember: async (id, fields) => {
+      // Optimistic
+      setData((prev) => {
+        const next = JSON.parse(JSON.stringify(prev));
+        const m = next.members.find((x) => x.id === id);
+        if (m) Object.assign(m, fields);
+        return next;
+      });
+      const mapped = {};
+      if ("target" in fields) mapped.target_score = fields.target;
+      if ("active" in fields) mapped.active = fields.active;
+      if ("duesPaid" in fields) mapped.dues_paid = fields.duesPaid;
+      if ("goalAchieved" in fields) mapped.goal_achieved = fields.goalAchieved;
+      await supabase.from("members").update(mapped).eq("id", id);
+    },
+
+    addMember: async (name, target) => {
+      const { data: ins } = await supabase
+        .from("members")
+        .insert({ name, target_score: target, next_target: null })
+        .select()
+        .single();
+      if (ins) {
+        setData((prev) => {
+          const next = JSON.parse(JSON.stringify(prev));
+          next.members.push({
+            id: ins.id, name: ins.name, target: ins.target_score, nextTarget: ins.next_target,
+            active: ins.active, duesPaid: ins.dues_paid, goalAchieved: ins.goal_achieved,
+          });
+          return next;
+        });
+      }
+    },
+
+    saveRound: async ({ date, course, attendees, scores, cartTeams, awards, worstScorer }) => {
+      const { data: round } = await supabase
+        .from("rounds")
+        .insert({ date, course })
+        .select()
+        .single();
+      if (!round) return;
+
+      const promises = [];
+
+      if (attendees.length > 0) {
+        promises.push(
+          supabase.from("round_attendees").insert(
+            attendees.map((mid) => ({ round_id: round.id, member_id: mid }))
+          )
+        );
+      }
+
+      if (scores.length > 0) {
+        const sorted = [...scores].sort((a, b) => a.score - b.score);
+        promises.push(
+          supabase.from("scores").insert(
+            sorted.map((s, i) => ({
+              round_id: round.id, member_id: s.id, score: s.score,
+              rank: i + 1, points: getPts(i + 1),
+            }))
+          )
+        );
+      }
+
+      if (cartTeams.length > 0) {
+        const rows = [];
+        cartTeams.forEach((cart, ci) => {
+          cart.forEach((mid) => { rows.push({ round_id: round.id, cart_number: ci + 1, member_id: mid }); });
+        });
+        if (rows.length > 0) promises.push(supabase.from("cart_teams").insert(rows));
+      }
+
+      if (awards.length > 0) {
+        promises.push(
+          supabase.from("awards").insert(
+            awards.map((a) => ({ round_id: round.id, award_type: a.name, winner_name: a.winner }))
+          )
+        );
+      }
+
+      if (worstScorer) {
+        promises.push(
+          supabase.from("hat_history").insert({
+            round_id: round.id, holder_id: worstScorer.id, score: worstScorer.score, date,
+          })
+        );
+        promises.push(supabase.from("settings").upsert({ key: "hat_holder", value: worstScorer.id }));
+        promises.push(supabase.from("settings").upsert({ key: "hat_since", value: date }));
+      }
+
+      await Promise.all(promises);
+      await refetch();
+    },
+
+    refetch,
+  }), [refetch]);
+
+  // ═══ Computed ═══
   const mm = useMemo(() => {
     const m = {};
     data.members.forEach((mem) => {
@@ -113,7 +250,6 @@ export default function App() {
     return Object.entries(pts).map(([id, d]) => ({ id: Number(id), ...d })).sort((a, b) => b.total - a.total || a.wins < b.wins ? 1 : -1);
   }, [data]);
 
-  // Attendance calc
   const attendance = useMemo(() => {
     const att = {};
     data.members.forEach((m) => { att[m.id] = { count: 0, months: new Set() }; });
@@ -164,11 +300,11 @@ export default function App() {
 
       <main style={{ maxWidth: 960, margin: "0 auto", padding: "14px 12px" }}>
         {tab === "standings" && <Standings data={data} mm={mm} standings={standings} />}
-        {tab === "round" && <RoundMgr data={data} up={up} mm={mm} />}
-        {tab === "hat" && <HatTracker data={data} up={up} mm={mm} />}
+        {tab === "round" && <RoundMgr data={data} db={db} mm={mm} />}
+        {tab === "hat" && <HatTracker data={data} mm={mm} />}
         {tab === "attend" && <Attendance data={data} mm={mm} attendance={attendance} />}
-        {tab === "dues" && <Dues data={data} up={up} mm={mm} />}
-        {tab === "members" && <MembersMgr data={data} up={up} mm={mm} />}
+        {tab === "dues" && <Dues data={data} db={db} mm={mm} />}
+        {tab === "members" && <MembersMgr data={data} db={db} mm={mm} />}
         {tab === "rules" && <Rules />}
       </main>
     </div>
@@ -247,7 +383,6 @@ function Standings({ data, mm, standings }) {
         )}
       </Card>
 
-      {/* Point bars */}
       {scored.length > 0 && (
         <Card title="📊 라운드별 포인트 흐름">
           {scored.slice(0, 8).map((s) => {
@@ -271,23 +406,22 @@ function Standings({ data, mm, standings }) {
 }
 
 // ═══ ROUND MANAGER ═══
-function RoundMgr({ data, up, mm }) {
+function RoundMgr({ data, db, mm }) {
   const [date, setDate] = useState(""); const [course, setCourse] = useState("태광CC");
   const [sel, setSel] = useState([]); const [scores, setScores] = useState({});
   const [awards, setAwards] = useState([]); const [awName, setAwName] = useState(""); const [awWinner, setAwWinner] = useState("");
   const [step, setStep] = useState(1);
   const [cartTeams, setCartTeams] = useState([]);
+  const [saving, setSaving] = useState(false);
 
   const active = data.members.filter((m) => m.active);
   const toggle = (id) => setSel((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]);
 
-  // Cart team assignment: balance by avg score, 4 per cart
   const makeCartTeams = () => {
     if (sel.length < 4) return;
     const sorted = sel.map((id) => ({ id, avg: mm[id]?.avg || 100 })).sort((a, b) => a.avg - b.avg);
     const numCarts = Math.ceil(sorted.length / 4);
     const carts = Array.from({ length: numCarts }, () => []);
-    // Snake draft
     sorted.forEach((p, i) => {
       const cartIdx = i % numCarts;
       const round = Math.floor(i / numCarts);
@@ -301,7 +435,6 @@ function RoundMgr({ data, up, mm }) {
     return Object.entries(scores).filter(([_, v]) => v && Number(v) > 0).map(([id, v]) => ({ id: Number(id), score: Number(v) })).sort((a, b) => a.score - b.score).map((s, i) => ({ ...s, rank: i + 1, pts: getPts(i + 1) }));
   }, [scores]);
 
-  // Hat goes to worst scorer (no handicap from 2026)
   const worstScorer = rankPreview.length > 0 ? rankPreview[rankPreview.length - 1] : null;
 
   const addAward = () => {
@@ -310,17 +443,28 @@ function RoundMgr({ data, up, mm }) {
     setAwName(""); setAwWinner("");
   };
 
-  const save = () => {
+  const save = async () => {
     if (!date) return alert("날짜를 입력하세요");
     if (sel.length === 0) return alert("참석자를 선택하세요");
-    const scoreArr = Object.entries(scores).filter(([_, v]) => v && Number(v) > 0).map(([id, v]) => ({ id: Number(id), score: Number(v) }));
-    up((d) => {
-      d.rounds.push({ id: d.nextRoundId++, date, course, attendees: sel, scores: scoreArr, cartTeams, awards: [...awards] });
-      // Update hat holder
-      if (worstScorer) { d.hatHolder = worstScorer.id; d.hatSince = date; }
-    });
-    setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({}); setCartTeams([]); setAwards([]);
-    alert("✅ 월례회가 저장되었습니다!");
+    setSaving(true);
+    try {
+      const scoreArr = Object.entries(scores).filter(([_, v]) => v && Number(v) > 0).map(([id, v]) => ({ id: Number(id), score: Number(v) }));
+      await db.saveRound({
+        date, course,
+        attendees: sel,
+        scores: scoreArr,
+        cartTeams,
+        awards: [...awards],
+        worstScorer,
+      });
+      setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({}); setCartTeams([]); setAwards([]);
+      alert("✅ 월례회가 저장되었습니다!");
+    } catch (err) {
+      console.error(err);
+      alert("저장 실패: " + err.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -431,10 +575,9 @@ function RoundMgr({ data, up, mm }) {
 
         <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
           <Btn ghost color={C.mid} onClick={() => setStep(2)} style={{ flex: 1 }}>← 이전</Btn>
-          <Btn onClick={save} style={{ flex: 2, padding: 12, fontSize: 14 }}>✅ 월례회 저장</Btn>
+          <Btn onClick={save} disabled={saving} style={{ flex: 2, padding: 12, fontSize: 14 }}>{saving ? "저장 중..." : "✅ 월례회 저장"}</Btn>
         </div>
 
-        {/* Past rounds */}
         <Card title="📜 지난 월례회">
           {[...data.rounds].reverse().slice(0, 5).map((r) => {
             const sorted = r.scores ? [...r.scores].sort((a, b) => a.score - b.score) : [];
@@ -458,12 +601,11 @@ function RoundMgr({ data, up, mm }) {
 }
 
 // ═══ HAT TRACKER ═══
-function HatTracker({ data, up, mm }) {
+function HatTracker({ data, mm }) {
   const holder = data.hatHolder ? mm[data.hatHolder] : null;
   const since = data.hatSince;
   const days = since ? Math.floor((new Date() - new Date(since)) / 86400000) : 0;
 
-  // Hat history from rounds
   const hatHistory = useMemo(() => {
     return data.rounds.filter((r) => r.scores?.length > 0).map((r) => {
       const sorted = [...r.scores].sort((a, b) => a.score - b.score);
@@ -472,7 +614,6 @@ function HatTracker({ data, up, mm }) {
     });
   }, [data]);
 
-  // Count per member
   const hatCounts = useMemo(() => {
     const c = {};
     hatHistory.forEach((h) => { c[h.holderId] = (c[h.holderId] || 0) + 1; });
@@ -564,7 +705,7 @@ function Attendance({ data, mm, attendance }) {
 }
 
 // ═══ DUES MANAGEMENT ═══
-function Dues({ data, up, mm }) {
+function Dues({ data, db, mm }) {
   const activeMembers = data.members.filter((m) => m.active);
   const totalDues = activeMembers.filter((m) => m.duesPaid).length * DUES;
   const totalRefund = activeMembers.filter((m) => m.goalAchieved).length * GOAL_REFUND;
@@ -590,11 +731,11 @@ function Dues({ data, up, mm }) {
                 <span style={{ flex: 1, fontSize: 12, fontWeight: 500 }}>{m.name}</span>
                 <span style={{ fontSize: 10, color: C.dim }}>목표 {m.target}타{m.target <= 85 ? "이하" : "미만"}</span>
                 {info?.bestScore && <span style={{ fontSize: 10, color: achieved ? C.accent : C.mid }}>최저 {info.bestScore}타</span>}
-                <button onClick={() => up((d) => { const x = d.members.find((y) => y.id === m.id); if (x) x.duesPaid = !x.duesPaid; })}
+                <button onClick={() => db.updateMember(m.id, { duesPaid: !m.duesPaid })}
                   style={{ padding: "3px 8px", borderRadius: 5, border: "none", cursor: "pointer", fontSize: 10, fontWeight: 600, background: m.duesPaid ? C.accentDim : C.redDim, color: m.duesPaid ? C.accent : C.red }}>
                   {m.duesPaid ? "납입✓" : "미납"}
                 </button>
-                <button onClick={() => up((d) => { const x = d.members.find((y) => y.id === m.id); if (x) x.goalAchieved = !x.goalAchieved; })}
+                <button onClick={() => db.updateMember(m.id, { goalAchieved: !m.goalAchieved })}
                   style={{ padding: "3px 8px", borderRadius: 5, border: "none", cursor: "pointer", fontSize: 10, fontWeight: 600, background: m.goalAchieved ? C.gold + "20" : C.sf, color: m.goalAchieved ? C.gold : C.dim }}>
                   {m.goalAchieved ? "달성🎉" : "미달성"}
                 </button>
@@ -608,19 +749,22 @@ function Dues({ data, up, mm }) {
 }
 
 // ═══ MEMBERS ═══
-function MembersMgr({ data, up, mm }) {
+function MembersMgr({ data, db, mm }) {
   const [name, setName] = useState(""); const [tgt, setTgt] = useState("");
   const [editId, setEditId] = useState(null); const [editTgt, setEditTgt] = useState("");
+
   const saveTarget = (id) => {
     const v = Number(editTgt);
-    if (v > 0) up((d) => { const x = d.members.find((y) => y.id === id); if (x) x.target = v; });
+    if (v > 0) db.updateMember(id, { target: v });
     setEditId(null);
   };
+
   const add = () => {
     if (!name.trim()) return;
-    up((d) => { d.members.push({ id: d.nextMemberId++, name: name.trim(), target: tgt ? Number(tgt) : 95, nextTarget: null, active: true, duesPaid: false, goalAchieved: false }); });
+    db.addMember(name.trim(), tgt ? Number(tgt) : 95);
     setName(""); setTgt("");
   };
+
   return (
     <div>
       <Card title="👥 멤버 추가 (제7,8조: 80% 찬성 필요)">
@@ -652,7 +796,7 @@ function MembersMgr({ data, up, mm }) {
                 {info?.bestScore && <span style={{ marginLeft: 6, fontSize: 10, color: C.accent }}>best {info.bestScore}</span>}
               </div>
               <div style={{ display: "flex", gap: 4 }}>
-                <Btn ghost color={m.active ? C.accent : C.dim} onClick={() => up((d) => { const x = d.members.find((y) => y.id === m.id); if (x) x.active = !x.active; })} style={{ padding: "3px 8px", fontSize: 10 }}>{m.active ? "활동" : "휴면"}</Btn>
+                <Btn ghost color={m.active ? C.accent : C.dim} onClick={() => db.updateMember(m.id, { active: !m.active })} style={{ padding: "3px 8px", fontSize: 10 }}>{m.active ? "활동" : "휴면"}</Btn>
               </div>
             </div>
           );
