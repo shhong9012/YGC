@@ -102,6 +102,7 @@ async function fetchAll() {
     members: (members || []).map((m) => ({
       id: m.id, name: m.name, target: m.target_score, nextTarget: m.next_target,
       active: m.active, duesPaid: m.dues_paid, goalAchieved: m.goal_achieved,
+      isGuest: m.is_guest,
     })),
     rounds: roundList,
     hatHolder: settingsMap.hat_holder ?? null,
@@ -270,10 +271,21 @@ export default function App() {
           next.members.push({
             id: ins.id, name: ins.name, target: ins.target_score, nextTarget: ins.next_target,
             active: ins.active, duesPaid: ins.dues_paid, goalAchieved: ins.goal_achieved,
+            isGuest: ins.is_guest,
           });
           return next;
         });
       }
+    },
+
+    createGuestMember: async (name, targetScore) => {
+      if (!isAdmin) return null;
+      const { data: ins } = await supabase
+        .from("members")
+        .insert({ name, target_score: targetScore, is_guest: true, active: false })
+        .select()
+        .single();
+      return ins;
     },
 
     saveRound: async ({ date, course, attendees, scores, cartTeams, awards, worstScorer }) => {
@@ -367,7 +379,7 @@ export default function App() {
 
   const standings = useMemo(() => {
     const pts = {};
-    data.members.forEach((m) => { pts[m.id] = { total: 0, rounds: 0, wins: 0, podiums: 0, history: [] }; });
+    data.members.filter((m) => !m.isGuest).forEach((m) => { pts[m.id] = { total: 0, rounds: 0, wins: 0, podiums: 0, history: [] }; });
     data.rounds.forEach((r) => {
       if (!r.scores?.length) return;
       const sorted = [...r.scores].sort((a, b) => a.score - b.score);
@@ -385,7 +397,7 @@ export default function App() {
 
   const attendance = useMemo(() => {
     const att = {};
-    data.members.forEach((m) => { att[m.id] = { count: 0, months: new Set() }; });
+    data.members.filter((m) => !m.isGuest).forEach((m) => { att[m.id] = { count: 0, months: new Set() }; });
     data.rounds.forEach((r) => {
       const mo = new Date(r.date).getMonth() + 1;
       r.attendees?.forEach((id) => {
@@ -572,14 +584,46 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const [step, setStep] = useState(1);
   const [cartTeams, setCartTeams] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [guests, setGuests] = useState([]);
+  const [guestName, setGuestName] = useState("");
+  const [guestTarget, setGuestTarget] = useState("");
+  const [guestPairedWith, setGuestPairedWith] = useState("");
 
-  const active = data.members.filter((m) => m.active);
-  const toggle = (id) => setSel((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]);
+  const active = data.members.filter((m) => m.active && !m.isGuest);
+  const toggle = (id) => setSel((p) => {
+    const next = p.includes(id) ? p.filter((x) => x !== id) : [...p, id];
+    if (!next.includes(id)) {
+      setGuests((gp) => gp.map((g) => g.pairedWith === id ? { ...g, pairedWith: null } : g));
+    }
+    return next;
+  });
+
+  const addGuest = () => {
+    const n = guestName.trim();
+    if (!n) return;
+    const tgt = Number(guestTarget) || 100;
+    const paired = guestPairedWith ? Number(guestPairedWith) : null;
+    if (paired && !sel.includes(paired)) { alert("동반 멤버가 참석자에 포함되어 있지 않습니다."); return; }
+    setGuests((p) => [...p, { tempId: "guest_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6), name: n, target: tgt, pairedWith: paired }]);
+    setGuestName(""); setGuestTarget(""); setGuestPairedWith("");
+  };
+  const removeGuest = (tempId) => { setGuests((p) => p.filter((g) => g.tempId !== tempId)); setScores((p) => { const n = { ...p }; delete n[tempId]; return n; }); };
+
+  const getParticipantName = (id) => {
+    if (typeof id === "string" && id.startsWith("guest_")) { const g = guests.find((g) => g.tempId === id); return g ? g.name : "?"; }
+    return mm[id]?.name || "?";
+  };
+  const getParticipantAvg = (id) => {
+    if (typeof id === "string" && id.startsWith("guest_")) return null;
+    return mm[id]?.avg;
+  };
 
   const makeCartTeams = () => {
-    if (sel.length < 4) return;
-    const sorted = sel.map((id) => ({ id, avg: mm[id]?.avg || 100 })).sort((a, b) => a.avg - b.avg);
-    const numCarts = Math.ceil(sorted.length / 4);
+    const totalCount = sel.length + guests.length;
+    if (totalCount < 4) return;
+    // 멤버: avg가 있으면 avg, 없으면 목표타수 사용
+    const sorted = sel.map((id) => ({ id, avg: mm[id]?.avg || mm[id]?.target || 100 })).sort((a, b) => a.avg - b.avg);
+    const numCarts = Math.ceil(totalCount / 4);
     const carts = Array.from({ length: numCarts }, () => []);
     sorted.forEach((p, i) => {
       const cartIdx = i % numCarts;
@@ -587,14 +631,35 @@ function RoundMgr({ data, db, mm, isAdmin }) {
       const idx = round % 2 === 0 ? cartIdx : numCarts - 1 - cartIdx;
       carts[idx].push(p.id);
     });
+    // 동반 게스트: 지정 멤버와 같은 카트에 배정
+    const unpairedGuests = [];
+    guests.forEach((g) => {
+      if (g.pairedWith) {
+        const ci = carts.findIndex((c) => c.includes(g.pairedWith));
+        if (ci >= 0) { carts[ci].push(g.tempId); } else { unpairedGuests.push(g); }
+      } else { unpairedGuests.push(g); }
+    });
+    // 미지정 게스트: 가장 작은 카트에 배정
+    unpairedGuests.forEach((g) => {
+      const mi = carts.reduce((best, c, i) => c.length < carts[best].length ? i : best, 0);
+      carts[mi].push(g.tempId);
+    });
     setCartTeams(carts);
   };
 
   const rankPreview = useMemo(() => {
-    return Object.entries(scores).filter(([_, v]) => v && Number(v) > 0).map(([id, v]) => ({ id: Number(id), score: Number(v) })).sort((a, b) => a.score - b.score).map((s, i) => ({ ...s, rank: i + 1, pts: getPts(i + 1) }));
-  }, [scores]);
+    const memberScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && !String(id).startsWith("guest_")).map(([id, v]) => ({ id: Number(id), score: Number(v), isGuest: false }));
+    const guestScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && String(id).startsWith("guest_")).map(([id, v]) => ({ id, score: Number(v), isGuest: true, name: guests.find((g) => g.tempId === id)?.name }));
+    const all = [...memberScores, ...guestScores].sort((a, b) => a.score - b.score);
+    let memberRank = 0;
+    return all.map((s, i) => {
+      if (!s.isGuest) { memberRank++; return { ...s, rank: i + 1, memberRank, pts: getPts(memberRank) }; }
+      return { ...s, rank: i + 1, memberRank: null, pts: 0 };
+    });
+  }, [scores, guests]);
 
-  const worstScorer = rankPreview.length > 0 ? rankPreview[rankPreview.length - 1] : null;
+  const memberRankOnly = rankPreview.filter((r) => !r.isGuest);
+  const worstScorer = memberRankOnly.length > 0 ? memberRankOnly[memberRankOnly.length - 1] : null;
 
   const awardedWinners = useMemo(() => new Set(awards.map((a) => a.winner).filter(Boolean)), [awards]);
 
@@ -624,9 +689,9 @@ function RoundMgr({ data, db, mm, isAdmin }) {
       }
     });
     if (bestHandi && bestHandiDiff > 0) recs.handi_improved = bestHandi;
-    // 행운상: 상위 3명 제외, 미수상자 중 랜덤
+    // 행운상: 상위 3명 제외, 미수상자 중 랜덤 (게스트 제외)
     const top3Ids = new Set(rankPreview.slice(0, 3).map((s) => s.id));
-    const candidates = rankPreview.filter((s) => !top3Ids.has(s.id) && !awardedWinners.has(mm[s.id]?.name));
+    const candidates = rankPreview.filter((s) => !s.isGuest && !top3Ids.has(s.id) && !awardedWinners.has(mm[s.id]?.name));
     if (candidates.length > 0) {
       const pick = candidates[Math.floor(Math.random() * candidates.length)];
       recs.lucky = { id: pick.id, name: mm[pick.id]?.name };
@@ -651,16 +716,36 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     if (sel.length === 0) return alert("참석자를 선택하세요");
     setSaving(true);
     try {
-      const scoreArr = Object.entries(scores).filter(([_, v]) => v && Number(v) > 0).map(([id, v]) => ({ id: Number(id), score: Number(v) }));
+      // 게스트 멤버 레코드 생성 → tempId→realId 매핑
+      const guestIdMap = {};
+      for (const g of guests) {
+        const ins = await db.createGuestMember(g.name, g.target);
+        if (ins) guestIdMap[g.tempId] = ins.id;
+      }
+      // 참석자 = 정회원 + 게스트 실제 ID
+      const allAttendees = [...sel, ...guests.map((g) => guestIdMap[g.tempId]).filter(Boolean)];
+      // 스코어: tempId → realId 변환
+      const scoreArr = [];
+      Object.entries(scores).forEach(([id, v]) => {
+        if (!v || Number(v) <= 0) return;
+        if (String(id).startsWith("guest_")) {
+          const realId = guestIdMap[id];
+          if (realId) scoreArr.push({ id: realId, score: Number(v) });
+        } else { scoreArr.push({ id: Number(id), score: Number(v) }); }
+      });
+      // 카트팀: tempId → realId 변환
+      const resolvedCarts = cartTeams.map((cart) => cart.map((id) =>
+        typeof id === "string" && id.startsWith("guest_") ? (guestIdMap[id] || id) : id
+      ));
       await db.saveRound({
         date, course,
-        attendees: sel,
+        attendees: allAttendees,
         scores: scoreArr,
-        cartTeams,
+        cartTeams: resolvedCarts,
         awards: [...awards],
         worstScorer,
       });
-      setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({}); setCartTeams([]); setAwards([]);
+      setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({}); setCartTeams([]); setAwards([]); setGuests([]);
       alert("✅ 월례회가 저장되었습니다!");
     } catch (err) {
       console.error(err);
@@ -680,7 +765,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
             <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>R{r.id} · {r.date} · {r.course}</div>
             {sorted.map((s, i) => (
               <div key={s.id} style={{ display: "flex", gap: 6, fontSize: 11, padding: "2px 0" }}>
-                <Medal rank={i + 1} /><span style={{ flex: 1 }}>{mm[s.id]?.name}</span><span style={{ color: C.mid }}>{s.score}타</span>
+                <Medal rank={i + 1} /><span style={{ flex: 1, color: mm[s.id]?.isGuest ? C.purple : "inherit" }}>{mm[s.id]?.isGuest ? "👤 " : ""}{mm[s.id]?.name}</span><span style={{ color: C.mid }}>{s.score}타</span>
                 <span style={{ fontWeight: 700, color: getPts(i + 1) > 0 ? C.accent : C.dim, minWidth: 24, textAlign: "right" }}>{getPts(i + 1) > 0 ? `+${getPts(i + 1)}` : "-"}</span>
               </div>
             ))}
@@ -708,7 +793,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
             <Inp label="골프장" value={course} onChange={(e) => setCourse(e.target.value)} />
           </div>
         </Card>
-        <Card title="🏌️ 참석자" badge={`${sel.length}명`}>
+        <Card title="🏌️ 참석자" badge={`${sel.length + guests.length}명${guests.length > 0 ? ` (게스트 ${guests.length})` : ""}`}>
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
             <Btn ghost color={C.accent} onClick={() => setSel(active.map((m) => m.id))} style={{ fontSize: 10, padding: "3px 10px" }}>전체선택</Btn>
           </div>
@@ -718,18 +803,57 @@ function RoundMgr({ data, db, mm, isAdmin }) {
               return <button key={m.id} onClick={() => toggle(m.id)} style={{ padding: "7px 12px", borderRadius: 16, border: "none", cursor: "pointer", background: s ? C.accent : C.sf, color: s ? "#000" : C.text, fontSize: 12, fontWeight: s ? 600 : 400 }}>{m.name}{mm[m.id]?.avg ? <span style={{ marginLeft: 3, fontSize: 9, opacity: .7 }}>({mm[m.id].avg})</span> : ""}</button>;
             })}
           </div>
-          {sel.length >= 4 && (
+          {/* 게스트 추가 */}
+          <div style={{ marginTop: 14, padding: 12, background: C.sf, borderRadius: 8, border: `1px dashed ${C.border}` }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: C.purple, marginBottom: 8 }}>👤 게스트 추가</div>
+            <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
+              <input placeholder="이름" value={guestName} onChange={(e) => setGuestName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addGuest()}
+                style={{ flex: 2, padding: "7px 8px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
+              <input placeholder="목표타수" type="number" value={guestTarget} onChange={(e) => setGuestTarget(e.target.value)}
+                style={{ flex: 1, padding: "7px 8px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12, textAlign: "center" }} />
+            </div>
+            <div style={{ display: "flex", gap: 5 }}>
+              <select value={guestPairedWith} onChange={(e) => setGuestPairedWith(e.target.value)}
+                style={{ flex: 1, padding: "7px 8px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }}>
+                <option value="">동반 멤버 (선택)</option>
+                {sel.map((id) => <option key={id} value={id}>{mm[id]?.name}</option>)}
+              </select>
+              <Btn onClick={addGuest} color={C.purple} style={{ padding: "7px 14px" }}>+ 추가</Btn>
+            </div>
+            {guests.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                {guests.map((g) => (
+                  <div key={g.tempId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 6, marginBottom: 3, background: C.purpleDim, fontSize: 12 }}>
+                    <span style={{ color: C.purple, fontWeight: 600 }}>👤 {g.name}</span>
+                    <span style={{ fontSize: 10, color: C.dim }}>목표 {g.target}타</span>
+                    {g.pairedWith && <span style={{ fontSize: 10, color: C.mid }}>→ {mm[g.pairedWith]?.name} 동반</span>}
+                    <span style={{ flex: 1 }} />
+                    <button onClick={() => removeGuest(g.tempId)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {(sel.length + guests.length) >= 4 && (
             <div style={{ marginTop: 10 }}>
               <Btn onClick={makeCartTeams} color={C.blue} style={{ width: "100%", marginBottom: 8 }}>🚗 카트배 밸런스 편성 (제12조)</Btn>
               {cartTeams.length > 0 && (
                 <div style={{ display: "grid", gridTemplateColumns: `repeat(${cartTeams.length}, 1fr)`, gap: 6 }}>
                   {cartTeams.map((cart, ci) => {
-                    const avg = cart.map((id) => mm[id]?.avg || 100);
-                    const cartAvg = (avg.reduce((a, b) => a + b, 0) / avg.length).toFixed(1);
+                    const avgArr = cart.map((id) => {
+                      if (typeof id === "string" && id.startsWith("guest_")) { const g = guests.find((g) => g.tempId === id); return g?.target || 100; }
+                      return mm[id]?.avg || mm[id]?.target || 100;
+                    });
+                    const cartAvg = (avgArr.reduce((a, b) => a + b, 0) / avgArr.length).toFixed(1);
                     return (
                       <div key={ci} style={{ padding: 10, borderRadius: 8, background: C.sf, border: `1px solid ${C.border}` }}>
                         <div style={{ fontSize: 11, fontWeight: 600, color: C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 <span style={{ fontWeight: 400, color: C.dim }}>avg {cartAvg}</span></div>
-                        {cart.map((id) => <div key={id} style={{ fontSize: 12, padding: "2px 0" }}>{mm[id]?.name} <span style={{ color: C.dim, fontSize: 10 }}>{mm[id]?.avg || "-"}</span></div>)}
+                        {cart.map((id) => {
+                          const isG = typeof id === "string" && id.startsWith("guest_");
+                          return <div key={id} style={{ fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text }}>
+                            {isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name} <span style={{ color: C.dim, fontSize: 10 }}>{isG ? "게스트" : (mm[id]?.avg || mm[id]?.target || "-")}</span>
+                          </div>;
+                        })}
                       </div>
                     );
                   })}
@@ -737,7 +861,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
               )}
             </div>
           )}
-          {sel.length > 0 && <Btn onClick={() => setStep(2)} style={{ marginTop: 10, width: "100%" }}>다음 →</Btn>}
+          {(sel.length + guests.length) > 0 && <Btn onClick={() => setStep(2)} style={{ marginTop: 10, width: "100%" }}>다음 →</Btn>}
         </Card>
       </>)}
 
@@ -752,15 +876,25 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                   style={{ width: 64, padding: "7px 8px", textAlign: "center", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 13, fontWeight: 600, outline: "none" }} />
               </div>
             ))}
+            {guests.map((g) => (
+              <div key={g.tempId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0" }}>
+                <span style={{ flex: 1, fontSize: 12, fontWeight: 500, color: C.purple }}>👤 {g.name}</span>
+                <span style={{ fontSize: 10, color: C.dim }}>게스트</span>
+                <input type="number" placeholder="타수" value={scores[g.tempId] || ""} onChange={(e) => setScores((p) => ({ ...p, [g.tempId]: e.target.value }))}
+                  style={{ width: 64, padding: "7px 8px", textAlign: "center", background: C.sf, border: `1px solid ${C.purple}40`, borderRadius: 7, color: C.text, fontSize: 13, fontWeight: 600, outline: "none" }} />
+              </div>
+            ))}
           </div>
         </Card>
 
         {rankPreview.length > 0 && (
           <Card title="🏁 순위 & F1 포인트 미리보기" accent={C.accent}>
             {rankPreview.map((r) => (
-              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6, background: r.rank <= 3 ? `${[C.gold, C.silver, C.bronze][r.rank - 1]}06` : "transparent" }}>
+              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6, background: !r.isGuest && r.rank <= 3 ? `${[C.gold, C.silver, C.bronze][r.rank - 1]}06` : "transparent" }}>
                 <Medal rank={r.rank} />
-                <span style={{ flex: 1, fontSize: 12, fontWeight: r.rank <= 3 ? 600 : 400 }}>{mm[r.id]?.name}</span>
+                <span style={{ flex: 1, fontSize: 12, fontWeight: r.rank <= 3 ? 600 : 400, color: r.isGuest ? C.purple : C.text }}>
+                  {r.isGuest ? `👤 ${r.name}` : mm[r.id]?.name}{r.isGuest ? " (게스트)" : ""}
+                </span>
                 <span style={{ fontSize: 12, color: C.mid }}>{r.score}타</span>
                 <span style={{ fontSize: 13, fontWeight: 800, color: r.pts > 0 ? C.accent : C.dim, minWidth: 30, textAlign: "right" }}>{r.pts > 0 ? `+${r.pts}` : "-"}</span>
               </div>
@@ -790,6 +924,10 @@ function RoundMgr({ data, db, mm, isAdmin }) {
               {sel.map((id) => {
                 const won = awardedWinners.has(mm[id]?.name);
                 return <option key={id} value={mm[id]?.name} disabled={won}>{mm[id]?.name}{won ? " ✓수상완료" : ""}</option>;
+              })}
+              {guests.map((g) => {
+                const won = awardedWinners.has(g.name);
+                return <option key={g.tempId} value={g.name} disabled={won}>👤 {g.name} (게스트){won ? " ✓수상완료" : ""}</option>;
               })}
             </select>
             <Btn onClick={() => addAward()} style={{ padding: "7px 12px" }}>+</Btn>
@@ -859,10 +997,11 @@ function HatTracker({ data, mm }) {
   const hatHistory = useMemo(() => {
     return data.rounds.filter((r) => r.scores?.length > 0).map((r) => {
       const sorted = [...r.scores].sort((a, b) => a.score - b.score);
-      const worst = sorted[sorted.length - 1];
+      const nonGuest = sorted.filter((s) => !mm[s.id]?.isGuest);
+      const worst = nonGuest.length > 0 ? nonGuest[nonGuest.length - 1] : sorted[sorted.length - 1];
       return { roundId: r.id, date: r.date, holderId: worst.id, score: worst.score };
     });
-  }, [data]);
+  }, [data, mm]);
 
   const hatCounts = useMemo(() => {
     const c = {};
@@ -913,7 +1052,7 @@ function HatTracker({ data, mm }) {
 
 // ═══ ATTENDANCE ═══
 function Attendance({ data, mm, attendance }) {
-  const activeMembers = data.members.filter((m) => m.active);
+  const activeMembers = data.members.filter((m) => m.active && !m.isGuest);
   return (
     <div>
       <Card title="📋 출석 현황 (제10조)" badge={`${ACTIVE_MONTHS.length}회 중 ${REQUIRED_ATTENDANCE}회 필요`}>
@@ -956,7 +1095,7 @@ function Attendance({ data, mm, attendance }) {
 
 // ═══ DUES MANAGEMENT ═══
 function Dues({ data, db, mm, isAdmin }) {
-  const activeMembers = data.members.filter((m) => m.active);
+  const activeMembers = data.members.filter((m) => m.active && !m.isGuest);
   const totalDues = activeMembers.filter((m) => m.duesPaid).length * DUES;
   const totalRefund = activeMembers.filter((m) => m.goalAchieved).length * GOAL_REFUND;
 
@@ -1040,8 +1179,8 @@ function MembersMgr({ data, db, mm, isAdmin }) {
           </div>
         </Card>
       )}
-      <Card title={`멤버 목록`} badge={`${data.members.length}명`}>
-        {data.members.map((m) => {
+      <Card title={`멤버 목록`} badge={`${data.members.filter((m) => !m.isGuest).length}명`}>
+        {data.members.filter((m) => !m.isGuest).map((m) => {
           const info = mm[m.id];
           return (
             <div key={m.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", borderRadius: 8, marginBottom: 4, background: m.active ? C.sf : C.bg, border: `1px solid ${m.active ? C.border : C.bg}`, opacity: m.active ? 1 : .4 }}>
