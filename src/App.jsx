@@ -95,7 +95,7 @@ async function fetchAll() {
     const carts = cartNums.map((n) => rCarts.filter((c) => c.cart_number === n).map((c) => c.member_id));
     const rAwards = (awardsData || []).filter((a) => a.round_id === r.id).map((a) => ({ name: a.award_type, winner: a.winner_name }));
     const rExpenses = (expensesData || []).filter((e) => e.round_id === r.id).map((e) => ({ id: e.id, category: e.category, itemName: e.item_name, amount: e.amount }));
-    return { id: r.id, date: r.date, course: r.course, attendees: rAtt, scores: rScores, cartTeams: carts, awards: rAwards, expenses: rExpenses };
+    return { id: r.id, date: r.date, course: r.course, status: r.status || "complete", attendees: rAtt, scores: rScores, cartTeams: carts, awards: rAwards, expenses: rExpenses };
   });
 
   return {
@@ -349,6 +349,113 @@ export default function App() {
       await refetch();
     },
 
+    // ── 중간 저장: 새 드래프트 생성 ──
+    saveDraft: async ({ date, course, attendees, cartTeams, scores, awards, status }) => {
+      if (!isAdmin) return null;
+      const { data: round } = await supabase
+        .from("rounds")
+        .insert({ date, course, status })
+        .select()
+        .single();
+      if (!round) return null;
+
+      const promises = [];
+      if (attendees.length > 0) {
+        promises.push(supabase.from("round_attendees").insert(
+          attendees.map((mid) => ({ round_id: round.id, member_id: mid }))
+        ));
+      }
+      if (cartTeams.length > 0) {
+        const rows = [];
+        cartTeams.forEach((cart, ci) => {
+          cart.forEach((mid) => { rows.push({ round_id: round.id, cart_number: ci + 1, member_id: mid }); });
+        });
+        if (rows.length > 0) promises.push(supabase.from("cart_teams").insert(rows));
+      }
+      if (scores && scores.length > 0) {
+        const sorted = [...scores].sort((a, b) => a.score - b.score);
+        promises.push(supabase.from("scores").insert(
+          sorted.map((s, i) => ({ round_id: round.id, member_id: s.id, score: s.score, rank: i + 1, points: getPts(i + 1) }))
+        ));
+      }
+      if (awards && awards.length > 0) {
+        promises.push(supabase.from("awards").insert(
+          awards.map((a) => ({ round_id: round.id, award_type: a.name, winner_name: a.winner }))
+        ));
+      }
+      await Promise.all(promises);
+      await refetch();
+      return round.id;
+    },
+
+    // ── 중간 저장: 기존 드래프트 업데이트 ──
+    updateDraft: async (roundId, { date, course, attendees, cartTeams, scores, awards, worstScorer, status }) => {
+      if (!isAdmin) return;
+      // 라운드 기본 정보 업데이트
+      await supabase.from("rounds").update({ date, course, status }).eq("id", roundId);
+
+      // 기존 데이터 삭제 후 재삽입
+      const delPromises = [
+        supabase.from("round_attendees").delete().eq("round_id", roundId),
+        supabase.from("cart_teams").delete().eq("round_id", roundId),
+        supabase.from("scores").delete().eq("round_id", roundId),
+        supabase.from("awards").delete().eq("round_id", roundId),
+      ];
+      // complete 시 hat 관련도 삭제 후 재삽입
+      if (status === "complete") {
+        delPromises.push(supabase.from("hat_history").delete().eq("round_id", roundId));
+      }
+      await Promise.all(delPromises);
+
+      const insPromises = [];
+      if (attendees.length > 0) {
+        insPromises.push(supabase.from("round_attendees").insert(
+          attendees.map((mid) => ({ round_id: roundId, member_id: mid }))
+        ));
+      }
+      if (cartTeams.length > 0) {
+        const rows = [];
+        cartTeams.forEach((cart, ci) => {
+          cart.forEach((mid) => { rows.push({ round_id: roundId, cart_number: ci + 1, member_id: mid }); });
+        });
+        if (rows.length > 0) insPromises.push(supabase.from("cart_teams").insert(rows));
+      }
+      if (scores && scores.length > 0) {
+        const sorted = [...scores].sort((a, b) => a.score - b.score);
+        insPromises.push(supabase.from("scores").insert(
+          sorted.map((s, i) => ({ round_id: roundId, member_id: s.id, score: s.score, rank: i + 1, points: getPts(i + 1) }))
+        ));
+      }
+      if (awards && awards.length > 0) {
+        insPromises.push(supabase.from("awards").insert(
+          awards.map((a) => ({ round_id: roundId, award_type: a.name, winner_name: a.winner }))
+        ));
+      }
+      if (status === "complete" && worstScorer) {
+        insPromises.push(supabase.from("hat_history").insert({
+          round_id: roundId, holder_id: worstScorer.id, score: worstScorer.score, date,
+        }));
+        insPromises.push(supabase.from("settings").upsert({ key: "hat_holder", value: worstScorer.id }));
+        insPromises.push(supabase.from("settings").upsert({ key: "hat_since", value: date }));
+      }
+      await Promise.all(insPromises);
+      await refetch();
+    },
+
+    // ── 드래프트 삭제 ──
+    deleteDraft: async (roundId) => {
+      if (!isAdmin) return;
+      await Promise.all([
+        supabase.from("round_attendees").delete().eq("round_id", roundId),
+        supabase.from("cart_teams").delete().eq("round_id", roundId),
+        supabase.from("scores").delete().eq("round_id", roundId),
+        supabase.from("awards").delete().eq("round_id", roundId),
+        supabase.from("hat_history").delete().eq("round_id", roundId),
+      ]);
+      await supabase.from("rounds").delete().eq("id", roundId);
+      await refetch();
+    },
+
     addExpense: async (roundId, category, itemName, amount) => {
       if (!isAdmin) return;
       await supabase.from("expenses").insert({
@@ -371,7 +478,7 @@ export default function App() {
     const m = {};
     data.members.forEach((mem) => {
       const scores = [];
-      data.rounds.forEach((r) => { const s = r.scores?.find((x) => x.id === mem.id); if (s) scores.push(s.score); });
+      data.rounds.filter((r) => r.status === "complete").forEach((r) => { const s = r.scores?.find((x) => x.id === mem.id); if (s) scores.push(s.score); });
       m[mem.id] = { ...mem, avg: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10 : null, played: scores.length, scores, bestScore: scores.length ? Math.min(...scores) : null };
     });
     return m;
@@ -380,7 +487,7 @@ export default function App() {
   const standings = useMemo(() => {
     const pts = {};
     data.members.filter((m) => !m.isGuest).forEach((m) => { pts[m.id] = { total: 0, rounds: 0, wins: 0, podiums: 0, history: [] }; });
-    data.rounds.forEach((r) => {
+    data.rounds.filter((r) => r.status === "complete").forEach((r) => {
       if (!r.scores?.length) return;
       const sorted = [...r.scores].sort((a, b) => a.score - b.score);
       sorted.forEach((s, i) => {
@@ -398,7 +505,7 @@ export default function App() {
   const attendance = useMemo(() => {
     const att = {};
     data.members.filter((m) => !m.isGuest).forEach((m) => { att[m.id] = { count: 0, months: new Set() }; });
-    data.rounds.forEach((r) => {
+    data.rounds.filter((r) => r.status === "complete").forEach((r) => {
       const mo = new Date(r.date).getMonth() + 1;
       r.attendees?.forEach((id) => {
         if (att[id]) { att[id].count++; att[id].months.add(mo); }
@@ -511,7 +618,7 @@ function Medal({ rank }) {
 // ═══ CHAMPIONSHIP STANDINGS ═══
 function Standings({ data, mm, standings }) {
   const scored = standings.filter((s) => s.rounds > 0);
-  const totalR = data.rounds.filter((r) => r.scores?.length).length;
+  const totalR = data.rounds.filter((r) => r.status === "complete" && r.scores?.length).length;
   return (
     <div>
       <Card title="🏎️ F1 포인트 시스템 (제11조)" badge="상위 6명">
@@ -588,6 +695,52 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const [guestName, setGuestName] = useState("");
   const [guestTarget, setGuestTarget] = useState("");
   const [guestPairedWith, setGuestPairedWith] = useState("");
+  const [editingRoundId, setEditingRoundId] = useState(null);
+
+  // 드래프트(미완료) 라운드 목록
+  const drafts = data.rounds.filter((r) => r.status && r.status !== "complete");
+
+  const resetForm = () => {
+    setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({});
+    setCartTeams([]); setAwards([]); setGuests([]); setEditingRoundId(null);
+  };
+
+  const loadDraft = (round) => {
+    setEditingRoundId(round.id);
+    setDate(round.date || "");
+    setCourse(round.course || "태광CC");
+    // 참석자 구분: 정회원 vs 게스트(is_guest=true인 멤버)
+    const memberIds = [];
+    const loadedGuests = [];
+    (round.attendees || []).forEach((id) => {
+      if (mm[id]?.isGuest) {
+        // 게스트는 실제 멤버 ID를 그대로 사용 (tempId 대신)
+        loadedGuests.push({ tempId: String(id), name: mm[id]?.name || "?", target: mm[id]?.target || 100, pairedWith: null, realId: id });
+      } else {
+        memberIds.push(id);
+      }
+    });
+    setSel(memberIds);
+    setGuests(loadedGuests);
+    // 카트팀 로드: 게스트 멤버 ID → string 키로 변환
+    const guestIdSet = new Set(loadedGuests.map((g) => g.realId));
+    setCartTeams((round.cartTeams || []).map((cart) =>
+      cart.map((id) => guestIdSet.has(id) ? String(id) : id)
+    ));
+    // 스코어 로드
+    const sc = {};
+    (round.scores || []).forEach((s) => {
+      const key = guestIdSet.has(s.id) ? String(s.id) : s.id;
+      sc[key] = s.score;
+    });
+    setScores(sc);
+    // 수상 로드
+    setAwards((round.awards || []).map((a) => ({ name: a.name, winner: a.winner })));
+    // 다음 진행할 단계로 이동 (이전 단계 이동도 가능)
+    if (round.status === "draft_team") setStep(2);
+    else if (round.status === "draft_score") setStep(3);
+    else setStep(1);
+  };
 
   const active = data.members.filter((m) => m.active && !m.isGuest);
   const toggle = (id) => setSel((p) => {
@@ -609,12 +762,20 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   };
   const removeGuest = (tempId) => { setGuests((p) => p.filter((g) => g.tempId !== tempId)); setScores((p) => { const n = { ...p }; delete n[tempId]; return n; }); };
 
+  const isGuestId = (id) => {
+    if (typeof id === "string" && id.startsWith("guest_")) return true;
+    // 드래프트에서 로드된 게스트: tempId가 숫자 문자열
+    const g = guests.find((g) => g.tempId === String(id));
+    return g != null;
+  };
   const getParticipantName = (id) => {
-    if (typeof id === "string" && id.startsWith("guest_")) { const g = guests.find((g) => g.tempId === id); return g ? g.name : "?"; }
+    const g = guests.find((g) => g.tempId === String(id));
+    if (g) return g.name;
+    if (typeof id === "string" && id.startsWith("guest_")) return "?";
     return mm[id]?.name || "?";
   };
   const getParticipantAvg = (id) => {
-    if (typeof id === "string" && id.startsWith("guest_")) return null;
+    if (isGuestId(id)) return null;
     return mm[id]?.avg;
   };
 
@@ -664,16 +825,18 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     setCartTeams(carts);
   };
 
+  const guestTempIds = useMemo(() => new Set(guests.map((g) => g.tempId)), [guests]);
+
   const rankPreview = useMemo(() => {
-    const memberScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && !String(id).startsWith("guest_")).map(([id, v]) => ({ id: Number(id), score: Number(v), isGuest: false }));
-    const guestScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && String(id).startsWith("guest_")).map(([id, v]) => ({ id, score: Number(v), isGuest: true, name: guests.find((g) => g.tempId === id)?.name }));
+    const memberScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && !guestTempIds.has(id)).map(([id, v]) => ({ id: Number(id), score: Number(v), isGuest: false }));
+    const guestScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && guestTempIds.has(id)).map(([id, v]) => ({ id, score: Number(v), isGuest: true, name: guests.find((g) => g.tempId === id)?.name }));
     const all = [...memberScores, ...guestScores].sort((a, b) => a.score - b.score);
     let memberRank = 0;
     return all.map((s, i) => {
       if (!s.isGuest) { memberRank++; return { ...s, rank: i + 1, memberRank, pts: getPts(memberRank) }; }
       return { ...s, rank: i + 1, memberRank: null, pts: 0 };
     });
-  }, [scores, guests]);
+  }, [scores, guests, guestTempIds]);
 
   const memberRankOnly = rankPreview.filter((r) => !r.isGuest);
   const worstScorer = memberRankOnly.length > 0 ? memberRankOnly[memberRankOnly.length - 1] : null;
@@ -728,41 +891,84 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     setAwName(""); setAwWinner("");
   };
 
+  // 게스트 ID 해결: 새 게스트(guest_ prefix)만 멤버 생성, 기존 realId는 유지
+  const resolveGuests = async () => {
+    const guestIdMap = {};
+    for (const g of guests) {
+      if (g.realId) {
+        // 드래프트에서 로드된 기존 게스트: realId 그대로 사용
+        guestIdMap[g.tempId] = g.realId;
+      } else {
+        // 새 게스트: 멤버 레코드 생성
+        const ins = await db.createGuestMember(g.name, g.target);
+        if (ins) guestIdMap[g.tempId] = ins.id;
+      }
+    }
+    return guestIdMap;
+  };
+
+  const buildPayload = (guestIdMap, status) => {
+    const allAttendees = [...sel, ...guests.map((g) => guestIdMap[g.tempId]).filter(Boolean)];
+    const scoreArr = [];
+    Object.entries(scores).forEach(([id, v]) => {
+      if (!v || Number(v) <= 0) return;
+      const strId = String(id);
+      if (strId.startsWith("guest_") || (guestIdMap[strId] != null)) {
+        const realId = guestIdMap[strId];
+        if (realId) scoreArr.push({ id: realId, score: Number(v) });
+      } else { scoreArr.push({ id: Number(id), score: Number(v) }); }
+    });
+    const resolvedCarts = cartTeams.map((cart) => cart.map((id) => {
+      const strId = String(id);
+      return guestIdMap[strId] != null ? guestIdMap[strId] : (typeof id === "string" ? Number(id) || id : id);
+    }));
+    return { date, course, attendees: allAttendees, scores: scoreArr, cartTeams: resolvedCarts, awards: [...awards], worstScorer, status };
+  };
+
+  // 중간 저장 (Step 1: 팀, Step 2: 스코어)
+  const saveDraft = async (draftStatus) => {
+    if (!date) return alert("날짜를 입력하세요");
+    if (sel.length === 0) return alert("참석자를 선택하세요");
+    setSaving(true);
+    try {
+      const guestIdMap = await resolveGuests();
+      const payload = buildPayload(guestIdMap, draftStatus);
+      if (editingRoundId) {
+        await db.updateDraft(editingRoundId, payload);
+      } else {
+        const newId = await db.saveDraft(payload);
+        if (newId) setEditingRoundId(newId);
+      }
+      alert(draftStatus === "draft_team" ? "💾 팀 편성이 중간 저장되었습니다!" : "💾 스코어가 중간 저장되었습니다!");
+    } catch (err) {
+      console.error(err);
+      alert("저장 실패: " + err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 최종 저장 (Step 3)
   const save = async () => {
     if (!date) return alert("날짜를 입력하세요");
     if (sel.length === 0) return alert("참석자를 선택하세요");
     setSaving(true);
     try {
-      // 게스트 멤버 레코드 생성 → tempId→realId 매핑
-      const guestIdMap = {};
-      for (const g of guests) {
-        const ins = await db.createGuestMember(g.name, g.target);
-        if (ins) guestIdMap[g.tempId] = ins.id;
+      const guestIdMap = await resolveGuests();
+      const payload = buildPayload(guestIdMap, "complete");
+      if (editingRoundId) {
+        await db.updateDraft(editingRoundId, payload);
+      } else {
+        await db.saveRound({
+          date, course,
+          attendees: payload.attendees,
+          scores: payload.scores,
+          cartTeams: payload.cartTeams,
+          awards: payload.awards,
+          worstScorer,
+        });
       }
-      // 참석자 = 정회원 + 게스트 실제 ID
-      const allAttendees = [...sel, ...guests.map((g) => guestIdMap[g.tempId]).filter(Boolean)];
-      // 스코어: tempId → realId 변환
-      const scoreArr = [];
-      Object.entries(scores).forEach(([id, v]) => {
-        if (!v || Number(v) <= 0) return;
-        if (String(id).startsWith("guest_")) {
-          const realId = guestIdMap[id];
-          if (realId) scoreArr.push({ id: realId, score: Number(v) });
-        } else { scoreArr.push({ id: Number(id), score: Number(v) }); }
-      });
-      // 카트팀: tempId → realId 변환
-      const resolvedCarts = cartTeams.map((cart) => cart.map((id) =>
-        typeof id === "string" && id.startsWith("guest_") ? (guestIdMap[id] || id) : id
-      ));
-      await db.saveRound({
-        date, course,
-        attendees: allAttendees,
-        scores: scoreArr,
-        cartTeams: resolvedCarts,
-        awards: [...awards],
-        worstScorer,
-      });
-      setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({}); setCartTeams([]); setAwards([]); setGuests([]);
+      resetForm();
       alert("✅ 월례회가 저장되었습니다!");
     } catch (err) {
       console.error(err);
@@ -775,7 +981,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   // Past rounds view (shared between admin and viewer)
   const pastRoundsView = (
     <Card title="📜 지난 월례회">
-      {[...data.rounds].reverse().slice(0, 5).map((r) => {
+      {[...data.rounds].filter((r) => r.status === "complete").reverse().slice(0, 5).map((r) => {
         const sorted = r.scores ? [...r.scores].sort((a, b) => a.score - b.score) : [];
         return (
           <div key={r.id} style={{ padding: 10, background: C.sf, borderRadius: 8, marginBottom: 6, border: `1px solid ${C.border}` }}>
@@ -797,6 +1003,36 @@ function RoundMgr({ data, db, mm, isAdmin }) {
 
   return (
     <div>
+      {/* 미완료 드래프트 목록 */}
+      {drafts.length > 0 && !editingRoundId && (
+        <Card title="📝 임시 저장된 월례회" accent={C.warn}>
+          {drafts.map((r) => {
+            const statusLabel = r.status === "draft_team" ? "팀 편성 완료" : "스코어 입력 완료";
+            const statusIcon = r.status === "draft_team" ? "🚗" : "📊";
+            return (
+              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: C.sf, borderRadius: 8, marginBottom: 6, border: `1px solid ${C.border}` }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>R{r.id} · {r.date} · {r.course}</div>
+                  <div style={{ fontSize: 10, color: C.warn, marginTop: 2 }}>{statusIcon} {statusLabel} · 참석 {r.attendees?.length || 0}명</div>
+                </div>
+                <Btn onClick={() => loadDraft(r)} color={C.warn} style={{ padding: "6px 14px", fontSize: 11 }}>이어하기</Btn>
+                <button onClick={async () => { if (confirm("이 임시저장을 삭제하시겠습니까?")) { await db.deleteDraft(r.id); } }}
+                  style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 14, padding: "4px" }}>✕</button>
+              </div>
+            );
+          })}
+        </Card>
+      )}
+
+      {/* 편집 중 표시 */}
+      {editingRoundId && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: C.warnDim, borderRadius: 8, marginBottom: 8, border: `1px solid ${C.warn}30` }}>
+          <span style={{ fontSize: 12, color: C.warn, fontWeight: 600 }}>R{editingRoundId} 편집 중</span>
+          <span style={{ flex: 1 }} />
+          <Btn ghost color={C.mid} onClick={resetForm} style={{ padding: "4px 10px", fontSize: 10 }}>새 월례회</Btn>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 3, marginBottom: 12 }}>
         {["①참석", "②스코어", "③상품/저장"].map((l, i) => (
           <button key={i} onClick={() => setStep(i + 1)} style={{ flex: 1, padding: 7, borderRadius: 7, border: "none", cursor: "pointer", background: step === i + 1 ? C.accentDim : C.sf, color: step === i + 1 ? C.accent : C.dim, fontSize: 11, fontWeight: step === i + 1 ? 600 : 400 }}>{l}</button>
@@ -858,7 +1094,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                 <div style={{ display: "grid", gridTemplateColumns: `repeat(${cartTeams.length}, 1fr)`, gap: 6 }}>
                   {cartTeams.map((cart, ci) => {
                     const avgArr = cart.map((id) => {
-                      if (typeof id === "string" && id.startsWith("guest_")) { const g = guests.find((g) => g.tempId === id); return g?.target || 100; }
+                      if (isGuestId(id)) { const g = guests.find((g) => g.tempId === String(id)); return g?.target || 100; }
                       return mm[id]?.avg || mm[id]?.target || 100;
                     });
                     const cartAvg = (avgArr.reduce((a, b) => a + b, 0) / avgArr.length).toFixed(1);
@@ -866,7 +1102,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                       <div key={ci} style={{ padding: 10, borderRadius: 8, background: C.sf, border: `1px solid ${C.border}` }}>
                         <div style={{ fontSize: 11, fontWeight: 600, color: C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 <span style={{ fontWeight: 400, color: C.dim }}>avg {cartAvg}</span></div>
                         {cart.map((id) => {
-                          const isG = typeof id === "string" && id.startsWith("guest_");
+                          const isG = isGuestId(id);
                           return <div key={id} style={{ fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text }}>
                             {isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name} <span style={{ color: C.dim, fontSize: 10 }}>{isG ? "게스트" : (mm[id]?.avg || mm[id]?.target || "-")}</span>
                           </div>;
@@ -878,7 +1114,12 @@ function RoundMgr({ data, db, mm, isAdmin }) {
               )}
             </div>
           )}
-          {(sel.length + guests.length) > 0 && <Btn onClick={() => setStep(2)} style={{ marginTop: 10, width: "100%" }}>다음 →</Btn>}
+          {(sel.length + guests.length) > 0 && (
+            <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+              <Btn onClick={() => saveDraft("draft_team")} disabled={saving || !date} color={C.warn} style={{ flex: 1 }}>{saving ? "저장 중..." : "💾 팀 중간저장"}</Btn>
+              <Btn onClick={() => setStep(2)} style={{ flex: 1 }}>다음 →</Btn>
+            </div>
+          )}
         </Card>
       </>)}
 
@@ -925,6 +1166,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
         )}
         <div style={{ display: "flex", gap: 6 }}>
           <Btn ghost color={C.mid} onClick={() => setStep(1)} style={{ flex: 1 }}>← 이전</Btn>
+          <Btn onClick={() => saveDraft("draft_score")} disabled={saving || !date || rankPreview.length === 0} color={C.warn} style={{ flex: 1 }}>{saving ? "저장 중..." : "💾 스코어 중간저장"}</Btn>
           <Btn onClick={() => setStep(3)} style={{ flex: 1 }}>다음 →</Btn>
         </div>
       </>)}
@@ -996,7 +1238,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
 
         <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
           <Btn ghost color={C.mid} onClick={() => setStep(2)} style={{ flex: 1 }}>← 이전</Btn>
-          <Btn onClick={save} disabled={saving} style={{ flex: 2, padding: 12, fontSize: 14 }}>{saving ? "저장 중..." : "✅ 월례회 저장"}</Btn>
+          <Btn onClick={save} disabled={saving} style={{ flex: 2, padding: 12, fontSize: 14 }}>{saving ? "저장 중..." : "✅ 최종 저장"}</Btn>
         </div>
 
         {pastRoundsView}
@@ -1012,7 +1254,7 @@ function HatTracker({ data, mm }) {
   const days = since ? Math.floor((new Date() - new Date(since)) / 86400000) : 0;
 
   const hatHistory = useMemo(() => {
-    return data.rounds.filter((r) => r.scores?.length > 0).map((r) => {
+    return data.rounds.filter((r) => r.status === "complete" && r.scores?.length > 0).map((r) => {
       const sorted = [...r.scores].sort((a, b) => a.score - b.score);
       const nonGuest = sorted.filter((s) => !mm[s.id]?.isGuest);
       const worst = nonGuest.length > 0 ? nonGuest[nonGuest.length - 1] : sorted[sorted.length - 1];
@@ -1235,7 +1477,7 @@ function ExpensesMgr({ data, db, mm, isAdmin }) {
   const [itemName, setItemName] = useState("");
   const [amount, setAmount] = useState("");
 
-  const roundsWithData = [...data.rounds].reverse();
+  const roundsWithData = [...data.rounds].filter((r) => r.status === "complete").reverse();
   const round = data.rounds.find((r) => r.id === Number(selRound));
   const expenses = round?.expenses || [];
   const attendeeCount = round?.attendees?.length || MEMBERS_PER_ROUND;
@@ -1253,9 +1495,10 @@ function ExpensesMgr({ data, db, mm, isAdmin }) {
 
   // 시즌 요약
   const seasonSummary = useMemo(() => {
-    const allExpenses = data.rounds.flatMap((r) => (r.expenses || []).map((e) => ({ ...e, roundId: r.id, attendees: r.attendees?.length || MEMBERS_PER_ROUND })));
+    const completeRounds = data.rounds.filter((r) => r.status === "complete");
+    const allExpenses = completeRounds.flatMap((r) => (r.expenses || []).map((e) => ({ ...e, roundId: r.id, attendees: r.attendees?.length || MEMBERS_PER_ROUND })));
     const totalAll = allExpenses.reduce((s, e) => s + e.amount, 0);
-    const roundsWithExp = data.rounds.filter((r) => r.expenses?.length > 0);
+    const roundsWithExp = completeRounds.filter((r) => r.expenses?.length > 0);
     const avgPerRound = roundsWithExp.length > 0 ? Math.round(totalAll / roundsWithExp.length) : 0;
     // 카테고리별 합계
     const byCat = {};
@@ -1263,7 +1506,7 @@ function ExpensesMgr({ data, db, mm, isAdmin }) {
     allExpenses.forEach((e) => { byCat[e.category] = (byCat[e.category] || 0) + e.amount; });
     const maxCat = Math.max(...Object.values(byCat), 1);
     // 라운드별 인당 금액
-    const perRound = data.rounds.filter((r) => r.expenses?.length > 0).map((r) => {
+    const perRound = completeRounds.filter((r) => r.expenses?.length > 0).map((r) => {
       const total = r.expenses.reduce((s, e) => s + e.amount, 0);
       const cnt = r.attendees?.length || MEMBERS_PER_ROUND;
       return { id: r.id, date: r.date, total, perPerson: Math.round(total / cnt), count: cnt };
