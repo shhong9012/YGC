@@ -621,28 +621,45 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const makeCartTeams = () => {
     const totalCount = sel.length + guests.length;
     if (totalCount < 4) return;
-    // 멤버: avg가 있으면 avg, 없으면 목표타수 사용
-    const sorted = sel.map((id) => ({ id, avg: mm[id]?.avg || mm[id]?.target || 100 })).sort((a, b) => a.avg - b.avg);
     const numCarts = Math.ceil(totalCount / 4);
-    const carts = Array.from({ length: numCarts }, () => []);
-    sorted.forEach((p, i) => {
-      const cartIdx = i % numCarts;
-      const round = Math.floor(i / numCarts);
-      const idx = round % 2 === 0 ? cartIdx : numCarts - 1 - cartIdx;
-      carts[idx].push(p.id);
-    });
-    // 동반 게스트: 지정 멤버와 같은 카트에 배정
-    const unpairedGuests = [];
+    const maxPerCart = Math.ceil(totalCount / numCarts);
+    // 동반 쌍 파악: pairedMemberId → [guestTempId, ...]
+    const pairedMap = {};
+    const unpairedGuestList = [];
     guests.forEach((g) => {
-      if (g.pairedWith) {
-        const ci = carts.findIndex((c) => c.includes(g.pairedWith));
-        if (ci >= 0) { carts[ci].push(g.tempId); } else { unpairedGuests.push(g); }
-      } else { unpairedGuests.push(g); }
+      if (g.pairedWith && sel.includes(g.pairedWith)) {
+        if (!pairedMap[g.pairedWith]) pairedMap[g.pairedWith] = [];
+        pairedMap[g.pairedWith].push(g.tempId);
+      } else { unpairedGuestList.push(g); }
     });
-    // 미지정 게스트: 가장 작은 카트에 배정
-    unpairedGuests.forEach((g) => {
-      const mi = carts.reduce((best, c, i) => c.length < carts[best].length ? i : best, 0);
-      carts[mi].push(g.tempId);
+    // 동반 묶음 + 일반 멤버를 하나의 리스트로 (avg/target 기준 정렬)
+    const units = [];
+    const pairedMemberIds = new Set(Object.keys(pairedMap).map(Number));
+    sel.forEach((id) => {
+      const avg = mm[id]?.avg || mm[id]?.target || 100;
+      if (pairedMemberIds.has(id)) {
+        // 멤버 + 동반 게스트를 한 묶음으로
+        units.push({ ids: [id, ...pairedMap[id]], avg, size: 1 + pairedMap[id].length });
+      } else {
+        units.push({ ids: [id], avg, size: 1 });
+      }
+    });
+    // 미지정 게스트도 개별 유닛으로
+    unpairedGuestList.forEach((g) => {
+      units.push({ ids: [g.tempId], avg: g.target || 100, size: 1 });
+    });
+    // avg 기준 정렬 후 스네이크 드래프트
+    units.sort((a, b) => a.avg - b.avg);
+    const carts = Array.from({ length: numCarts }, () => []);
+    const cartSizes = Array(numCarts).fill(0);
+    units.forEach((u) => {
+      // 큰 묶음(동반 페어)은 가장 여유 있는 카트에
+      let bestIdx = 0;
+      for (let i = 1; i < numCarts; i++) {
+        if (cartSizes[i] < cartSizes[bestIdx]) bestIdx = i;
+      }
+      carts[bestIdx].push(...u.ids);
+      cartSizes[bestIdx] += u.size;
     });
     setCartTeams(carts);
   };
