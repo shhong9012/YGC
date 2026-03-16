@@ -25,15 +25,14 @@ const EXPENSE_CATEGORIES = [
 const EXPENSE_TARGET_MIN = 100000;
 const EXPENSE_TARGET_MAX = 150000;
 const AWARD_TYPES = [
+  { id: "first", label: "1등" },
+  { id: "cart_draw", label: "1등 카트내 추첨" },
   { id: "longest", label: "롱기스트" },
   { id: "nearpin", label: "니어핀" },
   { id: "eagle", label: "이글" },
+  { id: "handi_improved", label: "핸디대비개선" },
+  { id: "best_improved", label: "베스트대비개선" },
   { id: "lucky", label: "행운상" },
-  { id: "cart1", label: "카트배 1등" },
-  { id: "cart2", label: "카트배 2등" },
-  { id: "improved", label: "개선상" },
-  { id: "handi_improved", label: "핸디개선상" },
-  { id: "etc", label: "기타" },
 ];
 
 const C = {
@@ -687,7 +686,7 @@ function Standings({ data, mm, standings }) {
 function RoundMgr({ data, db, mm, isAdmin }) {
   const [date, setDate] = useState(""); const [course, setCourse] = useState("태광CC");
   const [sel, setSel] = useState([]); const [scores, setScores] = useState({});
-  const [awards, setAwards] = useState([]); const [awName, setAwName] = useState(""); const [awWinner, setAwWinner] = useState("");
+  const [awards, setAwards] = useState([]); const [awName, setAwName] = useState(""); const [awWinner, setAwWinner] = useState(""); const [luckyCount, setLuckyCount] = useState(1);
   const [step, setStep] = useState(1);
   const [cartTeams, setCartTeams] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -846,7 +845,10 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const autoRecommend = useMemo(() => {
     const recs = {};
     if (rankPreview.length === 0) return recs;
-    // 개선상: (avg - current score) 가장 큰 사람
+    // 1등
+    const first = rankPreview[0];
+    if (first) recs.first = { id: first.id, name: first.isGuest ? first.name : mm[first.id]?.name, score: first.score };
+    // 핸디대비개선: (avg - current score) 가장 큰 사람
     let bestImproved = null, bestImpDiff = -Infinity;
     rankPreview.forEach((s) => {
       const avg = mm[s.id]?.avg;
@@ -855,9 +857,9 @@ function RoundMgr({ data, db, mm, isAdmin }) {
         if (diff > bestImpDiff) { bestImpDiff = diff; bestImproved = { id: s.id, name: mm[s.id]?.name, diff: diff.toFixed(1) }; }
       }
     });
-    if (bestImproved && bestImpDiff > 0) recs.improved = bestImproved;
-    // 최고기록개선상: (역대 최고(최저) 타수 - 이번 타수) 가장 큰 사람
-    let bestHandi = null, bestHandiDiff = -Infinity;
+    if (bestImproved && bestImpDiff > 0) recs.handi_improved = bestImproved;
+    // 베스트대비개선: (역대 최고(최저) 타수 - 이번 타수) 가장 큰 사람
+    let bestRec = null, bestRecDiff = -Infinity;
     rankPreview.forEach((s) => {
       let personalBest = Infinity;
       data.rounds.forEach((r) => {
@@ -866,19 +868,12 @@ function RoundMgr({ data, db, mm, isAdmin }) {
       });
       if (personalBest < Infinity) {
         const diff = personalBest - s.score;
-        if (diff > bestHandiDiff) { bestHandiDiff = diff; bestHandi = { id: s.id, name: mm[s.id]?.name, diff }; }
+        if (diff > bestRecDiff) { bestRecDiff = diff; bestRec = { id: s.id, name: mm[s.id]?.name, diff }; }
       }
     });
-    if (bestHandi && bestHandiDiff > 0) recs.handi_improved = bestHandi;
-    // 행운상: 상위 3명 제외, 미수상자 중 랜덤 (게스트 제외)
-    const top3Ids = new Set(rankPreview.slice(0, 3).map((s) => s.id));
-    const candidates = rankPreview.filter((s) => !s.isGuest && !top3Ids.has(s.id) && !awardedWinners.has(mm[s.id]?.name));
-    if (candidates.length > 0) {
-      const pick = candidates[Math.floor(Math.random() * candidates.length)];
-      recs.lucky = { id: pick.id, name: mm[pick.id]?.name };
-    }
+    if (bestRec && bestRecDiff > 0) recs.best_improved = bestRec;
     return recs;
-  }, [rankPreview, mm, data.rounds, awardedWinners]);
+  }, [rankPreview, mm, data.rounds]);
 
   const addAward = (name, winner) => {
     const n = name || awName.trim();
@@ -890,6 +885,16 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     }
     setAwards((p) => [...p, { name: n, winner: w }]);
     setAwName(""); setAwWinner("");
+  };
+
+  const drawLucky = () => {
+    const top3Ids = new Set(rankPreview.slice(0, 3).map((s) => s.id));
+    const currentWinners = new Set(awards.map((a) => a.winner).filter(Boolean));
+    const candidates = rankPreview.filter((s) => !s.isGuest && !top3Ids.has(s.id) && !currentWinners.has(mm[s.id]?.name));
+    if (candidates.length === 0) { alert("추첨 가능한 인원이 없습니다."); return; }
+    const shuffled = [...candidates].sort(() => Math.random() - 0.5);
+    const picks = shuffled.slice(0, Math.min(luckyCount, candidates.length));
+    setAwards((p) => [...p, ...picks.map((s) => ({ name: "행운상", winner: mm[s.id]?.name }))]);
   };
 
   // 게스트 ID 해결: 새 게스트(guest_ prefix)만 멤버 생성, 기존 realId는 유지
@@ -1192,6 +1197,14 @@ function RoundMgr({ data, db, mm, isAdmin }) {
             </select>
             <Btn onClick={() => addAward()} style={{ padding: "7px 12px" }}>+</Btn>
           </div>
+          {awName === "행운상" && (
+            <div style={{ display: "flex", gap: 5, marginBottom: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: C.mid, whiteSpace: "nowrap" }}>🎲 행운상 인원</span>
+              <input type="number" min={1} max={sel.length} value={luckyCount} onChange={(e) => setLuckyCount(Math.max(1, Number(e.target.value)))} style={{ width: 50, padding: "6px 8px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12, textAlign: "center" }} />
+              <span style={{ fontSize: 10, color: C.dim }}>명</span>
+              <Btn onClick={drawLucky} color={C.purple} style={{ padding: "6px 14px", fontSize: 11 }}>🎲 추첨</Btn>
+            </div>
+          )}
           {awards.map((a, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: `1px solid ${C.border}`, fontSize: 12 }}>
               <span><span style={{ color: C.gold }}>🏆</span> {a.name} — <strong>{a.winner || "미정"}</strong></span>
@@ -1216,22 +1229,22 @@ function RoundMgr({ data, db, mm, isAdmin }) {
         {/* 자동 추천 */}
         {rankPreview.length > 0 && (Object.keys(autoRecommend).length > 0) && (
           <Card title="🤖 자동 추천" accent={C.purple}>
-            {autoRecommend.improved && (
+            {autoRecommend.first && (
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
-                <div><span style={{ fontSize: 12, fontWeight: 600 }}>개선상</span><span style={{ fontSize: 10, color: C.mid, marginLeft: 6 }}>{autoRecommend.improved.name} (avg 대비 {autoRecommend.improved.diff}타 개선)</span></div>
-                <Btn ghost color={C.purple} onClick={() => addAward("개선상", autoRecommend.improved.name)} style={{ padding: "3px 10px", fontSize: 10 }}>추가</Btn>
+                <div><span style={{ fontSize: 12, fontWeight: 600 }}>1등</span><span style={{ fontSize: 10, color: C.mid, marginLeft: 6 }}>{autoRecommend.first.name} ({autoRecommend.first.score}타)</span></div>
+                <Btn ghost color={C.purple} onClick={() => addAward("1등", autoRecommend.first.name)} style={{ padding: "3px 10px", fontSize: 10 }}>추가</Btn>
               </div>
             )}
             {autoRecommend.handi_improved && (
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
-                <div><span style={{ fontSize: 12, fontWeight: 600 }}>핸디개선상</span><span style={{ fontSize: 10, color: C.mid, marginLeft: 6 }}>{autoRecommend.handi_improved.name} (첫R 대비 {autoRecommend.handi_improved.diff}타 개선)</span></div>
-                <Btn ghost color={C.purple} onClick={() => addAward("핸디개선상", autoRecommend.handi_improved.name)} style={{ padding: "3px 10px", fontSize: 10 }}>추가</Btn>
+                <div><span style={{ fontSize: 12, fontWeight: 600 }}>핸디대비개선</span><span style={{ fontSize: 10, color: C.mid, marginLeft: 6 }}>{autoRecommend.handi_improved.name} (avg 대비 {autoRecommend.handi_improved.diff}타 개선)</span></div>
+                <Btn ghost color={C.purple} onClick={() => addAward("핸디대비개선", autoRecommend.handi_improved.name)} style={{ padding: "3px 10px", fontSize: 10 }}>추가</Btn>
               </div>
             )}
-            {autoRecommend.lucky && (
+            {autoRecommend.best_improved && (
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0" }}>
-                <div><span style={{ fontSize: 12, fontWeight: 600 }}>행운상</span><span style={{ fontSize: 10, color: C.mid, marginLeft: 6 }}>{autoRecommend.lucky.name} (상위3 제외 미수상자 랜덤)</span></div>
-                <Btn ghost color={C.purple} onClick={() => addAward("행운상", autoRecommend.lucky.name)} style={{ padding: "3px 10px", fontSize: 10 }}>추가</Btn>
+                <div><span style={{ fontSize: 12, fontWeight: 600 }}>베스트대비개선</span><span style={{ fontSize: 10, color: C.mid, marginLeft: 6 }}>{autoRecommend.best_improved.name} (최고기록 대비 {autoRecommend.best_improved.diff}타 개선)</span></div>
+                <Btn ghost color={C.purple} onClick={() => addAward("베스트대비개선", autoRecommend.best_improved.name)} style={{ padding: "3px 10px", fontSize: 10 }}>추가</Btn>
               </div>
             )}
           </Card>
