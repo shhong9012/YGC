@@ -856,16 +856,17 @@ function RoundMgr({ data, db, mm, isAdmin }) {
       }
     });
     if (bestImproved && bestImpDiff > 0) recs.improved = bestImproved;
-    // 핸디개선상: (첫 라운드 타수 - 이번 타수) 가장 큰 사람
+    // 최고기록개선상: (역대 최고(최저) 타수 - 이번 타수) 가장 큰 사람
     let bestHandi = null, bestHandiDiff = -Infinity;
     rankPreview.forEach((s) => {
-      const firstRound = data.rounds.find((r) => r.scores?.some((sc) => sc.id === s.id));
-      if (firstRound) {
-        const firstScore = firstRound.scores.find((sc) => sc.id === s.id)?.score;
-        if (firstScore != null) {
-          const diff = firstScore - s.score;
-          if (diff > bestHandiDiff) { bestHandiDiff = diff; bestHandi = { id: s.id, name: mm[s.id]?.name, diff }; }
-        }
+      let personalBest = Infinity;
+      data.rounds.forEach((r) => {
+        const rs = r.scores?.find((x) => x.id === s.id);
+        if (rs?.score != null && rs.score < personalBest) personalBest = rs.score;
+      });
+      if (personalBest < Infinity) {
+        const diff = personalBest - s.score;
+        if (diff > bestHandiDiff) { bestHandiDiff = diff; bestHandi = { id: s.id, name: mm[s.id]?.name, diff }; }
       }
     });
     if (bestHandi && bestHandiDiff > 0) recs.handi_improved = bestHandi;
