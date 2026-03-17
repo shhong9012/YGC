@@ -467,6 +467,18 @@ export default function App() {
       await refetch();
     },
 
+    deleteGuest: async (memberId) => {
+      if (!isAdmin) return;
+      // 관련 스코어/참석/카트 기록도 삭제
+      await Promise.all([
+        supabase.from("scores").delete().eq("member_id", memberId),
+        supabase.from("round_attendees").delete().eq("member_id", memberId),
+        supabase.from("cart_teams").delete().eq("member_id", memberId),
+      ]);
+      await supabase.from("members").delete().eq("id", memberId);
+      await refetch();
+    },
+
     refetch,
   }), [refetch, isAdmin]);
 
@@ -1632,6 +1644,34 @@ function MembersMgr({ data, db, mm, isAdmin }) {
           );
         })}
       </Card>
+
+      {/* 게스트 목록 */}
+      {(() => {
+        const guestMembers = data.members.filter((m) => m.isGuest);
+        if (guestMembers.length === 0) return null;
+        return (
+          <Card title="👤 게스트 목록" badge={`${guestMembers.length}명`} accent={C.purple}>
+            <div style={{ fontSize: 10, color: C.dim, marginBottom: 8 }}>월례회에 참가했던 게스트 목록입니다. 삭제 시 관련 기록도 함께 삭제됩니다.</div>
+            {guestMembers.map((m) => {
+              const info = mm[m.id];
+              return (
+                <div key={m.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", borderRadius: 8, marginBottom: 4, background: C.sf, border: `1px solid ${C.border}` }}>
+                  <div style={{ flex: 1 }}>
+                    <span style={{ fontWeight: 600, fontSize: 12, color: C.purple }}>👤 {m.name}</span>
+                    <span style={{ marginLeft: 6, fontSize: 10, color: C.dim }}>목표 {m.target}타</span>
+                    {info?.avg && <span style={{ marginLeft: 6, fontSize: 10, color: C.mid }}>avg {info.avg} · {info.played}R</span>}
+                    {info?.bestScore && <span style={{ marginLeft: 6, fontSize: 10, color: C.accent }}>best {info.bestScore}</span>}
+                  </div>
+                  {isAdmin && (
+                    <button onClick={async () => { if (confirm(`${m.name} 게스트를 삭제하시겠습니까? 관련 스코어/참석 기록도 삭제됩니다.`)) await db.deleteGuest(m.id); }}
+                      style={{ background: C.redDim, border: "none", borderRadius: 6, color: C.red, cursor: "pointer", fontSize: 10, fontWeight: 600, padding: "4px 10px" }}>삭제</button>
+                  )}
+                </div>
+              );
+            })}
+          </Card>
+        );
+      })()}
     </div>
   );
 }
