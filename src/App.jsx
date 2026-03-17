@@ -57,6 +57,7 @@ const TABS = [
   { id: "attend", label: "출석", icon: "📋" },
   { id: "dues", label: "회비", icon: "💰" },
   { id: "expenses", label: "지출", icon: "💳" },
+  { id: "gallery", label: "갤러리", icon: "📸" },
   { id: "members", label: "멤버", icon: "👥" },
   { id: "rules", label: "정관", icon: "📜" },
 ];
@@ -307,12 +308,11 @@ export default function App() {
       }
 
       if (scores.length > 0) {
-        const sorted = [...scores].sort((a, b) => a.score - b.score);
         promises.push(
           supabase.from("scores").insert(
-            sorted.map((s, i) => ({
+            scores.map((s, i) => ({
               round_id: round.id, member_id: s.id, score: s.score,
-              rank: i + 1, points: getPts(i + 1),
+              rank: s.rank ?? (i + 1), points: s.points ?? getPts(i + 1),
             }))
           )
         );
@@ -372,9 +372,8 @@ export default function App() {
         if (rows.length > 0) promises.push(supabase.from("cart_teams").insert(rows));
       }
       if (scores && scores.length > 0) {
-        const sorted = [...scores].sort((a, b) => a.score - b.score);
         promises.push(supabase.from("scores").insert(
-          sorted.map((s, i) => ({ round_id: round.id, member_id: s.id, score: s.score, rank: i + 1, points: getPts(i + 1) }))
+          scores.map((s, i) => ({ round_id: round.id, member_id: s.id, score: s.score, rank: s.rank ?? (i + 1), points: s.points ?? getPts(i + 1) }))
         ));
       }
       if (awards && awards.length > 0) {
@@ -420,9 +419,8 @@ export default function App() {
         if (rows.length > 0) insPromises.push(supabase.from("cart_teams").insert(rows));
       }
       if (scores && scores.length > 0) {
-        const sorted = [...scores].sort((a, b) => a.score - b.score);
         insPromises.push(supabase.from("scores").insert(
-          sorted.map((s, i) => ({ round_id: roundId, member_id: s.id, score: s.score, rank: i + 1, points: getPts(i + 1) }))
+          scores.map((s, i) => ({ round_id: roundId, member_id: s.id, score: s.score, rank: s.rank ?? (i + 1), points: s.points ?? getPts(i + 1) }))
         ));
       }
       if (awards && awards.length > 0) {
@@ -489,16 +487,18 @@ export default function App() {
     data.rounds.filter((r) => r.status === "complete").forEach((r) => {
       if (!r.scores?.length) return;
       const sorted = [...r.scores].sort((a, b) => a.score - b.score);
-      sorted.forEach((s, i) => {
-        const rank = i + 1, p = getPts(rank);
-        if (!pts[s.id]) return;
+      let memberRank = 0;
+      sorted.forEach((s) => {
+        if (!pts[s.id]) return; // 게스트 제외
+        memberRank++;
+        const p = getPts(memberRank);
         pts[s.id].total += p; pts[s.id].rounds++;
-        if (rank === 1) pts[s.id].wins++;
-        if (rank <= 3) pts[s.id].podiums++;
-        pts[s.id].history.push({ roundId: r.id, date: r.date, rank, pts: p, score: s.score });
+        if (memberRank === 1) pts[s.id].wins++;
+        if (memberRank <= 3) pts[s.id].podiums++;
+        pts[s.id].history.push({ roundId: r.id, date: r.date, rank: memberRank, pts: p, score: s.score });
       });
     });
-    return Object.entries(pts).map(([id, d]) => ({ id: Number(id), ...d })).sort((a, b) => b.total - a.total || a.wins < b.wins ? 1 : -1);
+    return Object.entries(pts).map(([id, d]) => ({ id: Number(id), ...d })).sort((a, b) => b.total - a.total || b.wins - a.wins || b.podiums - a.podiums);
   }, [data]);
 
   const attendance = useMemo(() => {
@@ -581,6 +581,7 @@ export default function App() {
         {tab === "attend" && <Attendance data={data} mm={mm} attendance={attendance} />}
         {tab === "dues" && <Dues data={data} db={db} mm={mm} isAdmin={isAdmin} />}
         {tab === "expenses" && <ExpensesMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
+        {tab === "gallery" && <Gallery data={data} mm={mm} isAdmin={isAdmin} />}
         {tab === "members" && <MembersMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
         {tab === "rules" && <Rules />}
       </main>
@@ -695,6 +696,9 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const [guestTarget, setGuestTarget] = useState("");
   const [guestPairedWith, setGuestPairedWith] = useState("");
   const [editingRoundId, setEditingRoundId] = useState(null);
+  const [tieBreaks, setTieBreaks] = useState({});
+  const [manualMode, setManualMode] = useState(false);
+  const [assigningCart, setAssigningCart] = useState(null);
 
   // 드래프트(미완료) 라운드 목록
   const drafts = data.rounds.filter((r) => r.status && r.status !== "complete");
@@ -702,6 +706,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const resetForm = () => {
     setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({});
     setCartTeams([]); setAwards([]); setGuests([]); setEditingRoundId(null);
+    setTieBreaks({}); setManualMode(false); setAssigningCart(null);
   };
 
   const loadDraft = (round) => {
@@ -735,10 +740,12 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     setScores(sc);
     // 수상 로드
     setAwards((round.awards || []).map((a) => ({ name: a.name, winner: a.winner })));
-    // 다음 진행할 단계로 이동 (이전 단계 이동도 가능)
+    // 다음 진행할 단계로 이동
     if (round.status === "draft_team") setStep(2);
     else if (round.status === "draft_score") setStep(3);
+    else if (round.status === "complete") setStep(2); // 완료된 라운드 편집 → 스코어부터
     else setStep(1);
+    setTieBreaks({});
   };
 
   const active = data.members.filter((m) => m.active && !m.isGuest);
@@ -806,7 +813,8 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     });
     // 미지정 게스트도 개별 유닛으로
     unpairedGuestList.forEach((g) => {
-      units.push({ ids: [g.tempId], avg: g.target || 100, size: 1 });
+      const gAvg = g.realId ? (mm[g.realId]?.avg || g.target || 100) : (g.target || 100);
+      units.push({ ids: [g.tempId], avg: gAvg, size: 1 });
     });
     // avg 기준 정렬 후 스네이크 드래프트
     units.sort((a, b) => a.avg - b.avg);
@@ -824,18 +832,78 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     setCartTeams(carts);
   };
 
+  // 기존 게스트 재참가
+  const existingGuests = data.members.filter((m) => m.isGuest);
+  const availableGuests = existingGuests.filter((eg) =>
+    !guests.some((g) => g.realId === eg.id || g.tempId === String(eg.id))
+  );
+  const addExistingGuest = (memberId) => {
+    const member = mm[memberId];
+    if (!member) return;
+    setGuests((p) => [...p, { tempId: String(memberId), name: member.name, target: member.target || 100, pairedWith: null, realId: memberId }]);
+  };
+
+  // 수동 카트 편성
+  const getAllParticipantIds = () => [...sel, ...guests.map((g) => g.tempId)];
+  const initManualCarts = () => {
+    const totalCount = sel.length + guests.length;
+    if (totalCount < 2) return;
+    const numCarts = Math.ceil(totalCount / 4);
+    setCartTeams(Array.from({ length: numCarts }, () => []));
+    setManualMode(true);
+    setAssigningCart(0);
+  };
+  const addToCart = (cartIdx, playerId) => {
+    setCartTeams((prev) => {
+      const next = prev.map((c) => c.filter((id) => id !== playerId));
+      next[cartIdx] = [...next[cartIdx], playerId];
+      return next;
+    });
+  };
+  const removeFromCart = (playerId) => {
+    setCartTeams((prev) => prev.map((c) => c.filter((id) => id !== playerId)));
+  };
+  const addCartSlot = () => {
+    setCartTeams((prev) => [...prev, []]);
+  };
+
   const guestTempIds = useMemo(() => new Set(guests.map((g) => g.tempId)), [guests]);
 
   const rankPreview = useMemo(() => {
     const memberScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && !guestTempIds.has(id)).map(([id, v]) => ({ id: Number(id), score: Number(v), isGuest: false }));
     const guestScores = Object.entries(scores).filter(([id, v]) => v && Number(v) > 0 && guestTempIds.has(id)).map(([id, v]) => ({ id, score: Number(v), isGuest: true, name: guests.find((g) => g.tempId === id)?.name }));
-    const all = [...memberScores, ...guestScores].sort((a, b) => a.score - b.score);
+    const all = [...memberScores, ...guestScores].sort((a, b) => {
+      if (a.score !== b.score) return a.score - b.score;
+      const order = tieBreaks[a.score];
+      if (order) {
+        const aIdx = order.indexOf(String(a.id));
+        const bIdx = order.indexOf(String(b.id));
+        if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+      }
+      return 0;
+    });
     let memberRank = 0;
     return all.map((s, i) => {
       if (!s.isGuest) { memberRank++; return { ...s, rank: i + 1, memberRank, pts: getPts(memberRank) }; }
       return { ...s, rank: i + 1, memberRank: null, pts: 0 };
     });
-  }, [scores, guests, guestTempIds]);
+  }, [scores, guests, guestTempIds, tieBreaks]);
+
+  const swapTiedRanks = (idx) => {
+    const a = rankPreview[idx];
+    const b = rankPreview[idx + 1];
+    if (!a || !b || a.score !== b.score) return;
+    setTieBreaks((prev) => {
+      const next = { ...prev };
+      const currentOrder = next[a.score] || rankPreview.filter((r) => r.score === a.score).map((r) => String(r.id));
+      const swapped = [...currentOrder];
+      const aPos = swapped.indexOf(String(a.id));
+      const bPos = swapped.indexOf(String(b.id));
+      if (aPos !== -1 && bPos !== -1) [swapped[aPos], swapped[bPos]] = [swapped[bPos], swapped[aPos]];
+      next[a.score] = swapped;
+      return next;
+    });
+  };
 
   const memberRankOnly = rankPreview.filter((r) => !r.isGuest);
   const worstScorer = memberRankOnly.length > 0 ? memberRankOnly[memberRankOnly.length - 1] : null;
@@ -915,15 +983,17 @@ function RoundMgr({ data, db, mm, isAdmin }) {
 
   const buildPayload = (guestIdMap, status) => {
     const allAttendees = [...sel, ...guests.map((g) => guestIdMap[g.tempId]).filter(Boolean)];
-    const scoreArr = [];
-    Object.entries(scores).forEach(([id, v]) => {
-      if (!v || Number(v) <= 0) return;
-      const strId = String(id);
-      if (strId.startsWith("guest_") || (guestIdMap[strId] != null)) {
-        const realId = guestIdMap[strId];
-        if (realId) scoreArr.push({ id: realId, score: Number(v) });
-      } else { scoreArr.push({ id: Number(id), score: Number(v) }); }
-    });
+    // rankPreview 순서대로 스코어 생성 (동타 순위 반영)
+    const scoreArr = rankPreview.map((r) => {
+      let realId;
+      if (r.isGuest) {
+        realId = guestIdMap[String(r.id)];
+        if (!realId) return null;
+      } else {
+        realId = r.id;
+      }
+      return { id: realId, score: r.score, rank: r.rank, points: r.pts };
+    }).filter(Boolean);
     const resolvedCarts = cartTeams.map((cart) => cart.map((id) => {
       const strId = String(id);
       return guestIdMap[strId] != null ? guestIdMap[strId] : (typeof id === "string" ? Number(id) || id : id);
@@ -989,13 +1059,25 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     <Card title="📜 지난 월례회">
       {[...data.rounds].filter((r) => r.status === "complete").reverse().slice(0, 5).map((r) => {
         const sorted = r.scores ? [...r.scores].sort((a, b) => a.score - b.score) : [];
+        let mRank = 0;
+        const ranked = sorted.map((s, i) => {
+          const isG = mm[s.id]?.isGuest;
+          if (!isG) mRank++;
+          return { ...s, overallRank: i + 1, pts: isG ? 0 : getPts(mRank) };
+        });
         return (
           <div key={r.id} style={{ padding: 10, background: C.sf, borderRadius: 8, marginBottom: 6, border: `1px solid ${C.border}` }}>
-            <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4 }}>R{r.id} · {r.date} · {r.course}</div>
-            {sorted.map((s, i) => (
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+              <span style={{ flex: 1, fontWeight: 600, fontSize: 12 }}>R{r.id} · {r.date} · {r.course}</span>
+              {isAdmin && (
+                <button onClick={() => loadDraft(r)}
+                  style={{ padding: "3px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, color: C.accent, fontSize: 10, fontWeight: 600, cursor: "pointer" }}>편집</button>
+              )}
+            </div>
+            {ranked.map((s) => (
               <div key={s.id} style={{ display: "flex", gap: 6, fontSize: 11, padding: "2px 0" }}>
-                <Medal rank={i + 1} /><span style={{ flex: 1, color: mm[s.id]?.isGuest ? C.purple : "inherit" }}>{mm[s.id]?.isGuest ? "👤 " : ""}{mm[s.id]?.name}</span><span style={{ color: C.mid }}>{s.score}타</span>
-                <span style={{ fontWeight: 700, color: getPts(i + 1) > 0 ? C.accent : C.dim, minWidth: 24, textAlign: "right" }}>{getPts(i + 1) > 0 ? `+${getPts(i + 1)}` : "-"}</span>
+                <Medal rank={s.overallRank} /><span style={{ flex: 1, color: mm[s.id]?.isGuest ? C.purple : "inherit" }}>{mm[s.id]?.isGuest ? "👤 " : ""}{mm[s.id]?.name}</span><span style={{ color: C.mid }}>{s.score}타</span>
+                <span style={{ fontWeight: 700, color: s.pts > 0 ? C.accent : C.dim, minWidth: 24, textAlign: "right" }}>{s.pts > 0 ? `+${s.pts}` : "-"}</span>
               </div>
             ))}
             {r.awards?.length > 0 && <div style={{ marginTop: 4, fontSize: 10, color: C.gold }}>🏆 {r.awards.map((a) => `${a.name}:${a.winner}`).join(" · ")}</div>}
@@ -1065,6 +1147,19 @@ function RoundMgr({ data, db, mm, isAdmin }) {
           {/* 게스트 추가 */}
           <div style={{ marginTop: 14, padding: 12, background: C.sf, borderRadius: 8, border: `1px dashed ${C.border}` }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: C.purple, marginBottom: 8 }}>👤 게스트 추가</div>
+            {availableGuests.length > 0 && (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 10, color: C.dim, marginBottom: 4 }}>기존 게스트 재참가 (과거 기록 적용)</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {availableGuests.map((g) => (
+                    <button key={g.id} onClick={() => addExistingGuest(g.id)}
+                      style={{ padding: "5px 10px", borderRadius: 12, border: `1px dashed ${C.purple}`, background: "transparent", color: C.purple, fontSize: 11, cursor: "pointer" }}>
+                      + {g.name} {mm[g.id]?.avg ? `(avg ${mm[g.id].avg})` : mm[g.id]?.target ? `(목표 ${mm[g.id].target})` : ""}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
               <input placeholder="이름" value={guestName} onChange={(e) => setGuestName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addGuest()}
                 style={{ flex: 2, padding: "7px 8px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 12 }} />
@@ -1093,17 +1188,62 @@ function RoundMgr({ data, db, mm, isAdmin }) {
               </div>
             )}
           </div>
-          {(sel.length + guests.length) >= 4 && (
+          {(sel.length + guests.length) >= 2 && (
             <div style={{ marginTop: 10 }}>
-              <Btn onClick={makeCartTeams} color={C.blue} style={{ width: "100%", marginBottom: 8 }}>🚗 카트배 밸런스 편성 (제12조)</Btn>
-              {cartTeams.length > 0 && (
+              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                <Btn onClick={() => { if (sel.length + guests.length >= 4) { makeCartTeams(); setManualMode(false); } else { alert("자동 편성은 4명 이상 필요합니다."); } }} color={C.blue} style={{ flex: 1 }}>🚗 자동 편성</Btn>
+                <Btn onClick={initManualCarts} color={C.purple} ghost style={{ flex: 1 }}>✋ 수동 편성</Btn>
+              </div>
+              {manualMode && cartTeams.length > 0 && (() => {
+                const allIds = getAllParticipantIds();
+                const assignedIds = new Set(cartTeams.flat());
+                const unassigned = allIds.filter((id) => !assignedIds.has(id));
+                return (
+                  <div>
+                    {unassigned.length > 0 && (
+                      <div style={{ marginBottom: 8, padding: 8, background: C.warnDim, borderRadius: 8, border: `1px solid ${C.warn}30` }}>
+                        <div style={{ fontSize: 10, color: C.warn, marginBottom: 4, fontWeight: 600 }}>미배치 인원 ({unassigned.length}명) — 카트를 선택 후 클릭</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                          {unassigned.map((id) => (
+                            <button key={id} onClick={() => assigningCart !== null && addToCart(assigningCart, id)}
+                              style={{ padding: "5px 10px", borderRadius: 12, border: `1px solid ${C.border}`, background: C.card, color: isGuestId(id) ? C.purple : C.text, fontSize: 11, cursor: assigningCart !== null ? "pointer" : "default", opacity: assigningCart !== null ? 1 : 0.5 }}>
+                              {isGuestId(id) ? `👤 ${getParticipantName(id)}` : mm[id]?.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(cartTeams.length, 4)}, 1fr)`, gap: 6 }}>
+                      {cartTeams.map((cart, ci) => (
+                        <div key={ci} onClick={() => setAssigningCart(ci)}
+                          style={{ padding: 10, borderRadius: 8, background: C.sf, border: assigningCart === ci ? `2px solid ${C.purple}` : `1px solid ${C.border}`, cursor: "pointer", minHeight: 80 }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: assigningCart === ci ? C.purple : C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 ({cart.length}명)</div>
+                          {cart.map((id) => {
+                            const isG = isGuestId(id);
+                            return (
+                              <div key={id} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text }}>
+                                <span style={{ flex: 1 }}>{isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name}</span>
+                                <button onClick={(e) => { e.stopPropagation(); removeFromCart(id); }}
+                                  style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 11, padding: "0 2px" }}>✕</button>
+                              </div>
+                            );
+                          })}
+                          {cart.length === 0 && <div style={{ fontSize: 10, color: C.dim, textAlign: "center", padding: 8 }}>클릭하여 선택</div>}
+                        </div>
+                      ))}
+                    </div>
+                    <Btn onClick={addCartSlot} ghost color={C.dim} style={{ width: "100%", marginTop: 6, fontSize: 10 }}>+ 카트 추가</Btn>
+                  </div>
+                );
+              })()}
+              {!manualMode && cartTeams.length > 0 && (
                 <div style={{ display: "grid", gridTemplateColumns: `repeat(${cartTeams.length}, 1fr)`, gap: 6 }}>
                   {cartTeams.map((cart, ci) => {
                     const avgArr = cart.map((id) => {
                       if (isGuestId(id)) { const g = guests.find((g) => g.tempId === String(id)); return g?.target || 100; }
                       return mm[id]?.avg || mm[id]?.target || 100;
                     });
-                    const cartAvg = (avgArr.reduce((a, b) => a + b, 0) / avgArr.length).toFixed(1);
+                    const cartAvg = avgArr.length > 0 ? (avgArr.reduce((a, b) => a + b, 0) / avgArr.length).toFixed(1) : "-";
                     return (
                       <div key={ci} style={{ padding: 10, borderRadius: 8, background: C.sf, border: `1px solid ${C.border}` }}>
                         <div style={{ fontSize: 11, fontWeight: 600, color: C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 <span style={{ fontWeight: 400, color: C.dim }}>avg {cartAvg}</span></div>
@@ -1153,16 +1293,28 @@ function RoundMgr({ data, db, mm, isAdmin }) {
 
         {rankPreview.length > 0 && (
           <Card title="🏁 순위 & F1 포인트 미리보기" accent={C.accent}>
-            {rankPreview.map((r) => (
-              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6, background: !r.isGuest && r.rank <= 3 ? `${[C.gold, C.silver, C.bronze][r.rank - 1]}06` : "transparent" }}>
-                <Medal rank={r.rank} />
-                <span style={{ flex: 1, fontSize: 12, fontWeight: r.rank <= 3 ? 600 : 400, color: r.isGuest ? C.purple : C.text }}>
-                  {r.isGuest ? `👤 ${r.name}` : mm[r.id]?.name}{r.isGuest ? " (게스트)" : ""}
-                </span>
-                <span style={{ fontSize: 12, color: C.mid }}>{r.score}타</span>
-                <span style={{ fontSize: 13, fontWeight: 800, color: r.pts > 0 ? C.accent : C.dim, minWidth: 30, textAlign: "right" }}>{r.pts > 0 ? `+${r.pts}` : "-"}</span>
-              </div>
-            ))}
+            {rankPreview.map((r, idx) => {
+              const nextR = rankPreview[idx + 1];
+              const prevR = idx > 0 ? rankPreview[idx - 1] : null;
+              const isTiedNext = nextR && nextR.score === r.score;
+              const isTiedPrev = prevR && prevR.score === r.score;
+              const isTied = isTiedNext || isTiedPrev;
+              return (
+                <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6, background: !r.isGuest && r.rank <= 3 ? `${[C.gold, C.silver, C.bronze][r.rank - 1]}06` : isTied ? C.warnDim : "transparent", border: isTied ? `1px solid ${C.warn}20` : "1px solid transparent" }}>
+                  <Medal rank={r.rank} />
+                  <span style={{ flex: 1, fontSize: 12, fontWeight: r.rank <= 3 ? 600 : 400, color: r.isGuest ? C.purple : C.text }}>
+                    {r.isGuest ? `👤 ${r.name}` : mm[r.id]?.name}{r.isGuest ? " (게스트)" : ""}
+                  </span>
+                  {isTied && <span style={{ fontSize: 8, color: C.warn, padding: "1px 5px", background: `${C.warn}20`, borderRadius: 3, fontWeight: 600 }}>동타</span>}
+                  <span style={{ fontSize: 12, color: C.mid }}>{r.score}타</span>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: r.pts > 0 ? C.accent : C.dim, minWidth: 30, textAlign: "right" }}>{r.pts > 0 ? `+${r.pts}` : "-"}</span>
+                  {isTiedNext && isAdmin && (
+                    <button onClick={() => swapTiedRanks(idx)} title="동타 순위 변경"
+                      style={{ background: C.warnDim, border: `1px solid ${C.warn}40`, borderRadius: 4, color: C.warn, cursor: "pointer", fontSize: 11, padding: "2px 6px", fontWeight: 600 }}>↕</button>
+                  )}
+                </div>
+              );
+            })}
             {worstScorer && (
               <div style={{ marginTop: 8, padding: 8, background: C.redDim, borderRadius: 6, fontSize: 11, color: C.red }}>
                 🧢 ㄱㅈㅂ 모자 → <strong>{mm[worstScorer.id]?.name}</strong> ({worstScorer.score}타)
@@ -1684,5 +1836,165 @@ function Rules() {
         </div>
       </div>
     </Card>
+  );
+}
+
+// ═══ GALLERY ═══
+function Gallery({ data, mm, isAdmin }) {
+  const [selRound, setSelRound] = useState("");
+  const [photos, setPhotos] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [viewPhoto, setViewPhoto] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const completedRounds = useMemo(() =>
+    [...data.rounds].filter((r) => r.status === "complete").reverse()
+  , [data.rounds]);
+
+  const fetchPhotos = useCallback(async (roundId) => {
+    if (!roundId) { setPhotos([]); return; }
+    setLoading(true);
+    try {
+      const { data: files, error } = await supabase.storage
+        .from("gallery")
+        .list(`round_${roundId}`, { limit: 100, sortBy: { column: "created_at", order: "desc" } });
+      if (error) throw error;
+      const photoUrls = (files || [])
+        .filter((f) => f.name !== ".emptyFolderPlaceholder")
+        .map((f) => {
+          const { data: { publicUrl } } = supabase.storage.from("gallery").getPublicUrl(`round_${roundId}/${f.name}`);
+          return { name: f.name, url: publicUrl, createdAt: f.created_at };
+        });
+      setPhotos(photoUrls);
+    } catch (err) {
+      console.error("Gallery fetch error:", err);
+      setPhotos([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selRound) fetchPhotos(selRound);
+    else setPhotos([]);
+  }, [selRound, fetchPhotos]);
+
+  const handleUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0 || !selRound) return;
+    setUploading(true);
+    try {
+      for (const file of files) {
+        const ext = file.name.split(".").pop();
+        const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+        const { error } = await supabase.storage
+          .from("gallery")
+          .upload(`round_${selRound}/${fileName}`, file, { contentType: file.type });
+        if (error) throw error;
+      }
+      await fetchPhotos(selRound);
+    } catch (err) {
+      console.error("Upload error:", err);
+      alert("업로드 실패: " + err.message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const handleDelete = async (fileName) => {
+    if (!confirm("이 사진을 삭제하시겠습니까?")) return;
+    try {
+      const { error } = await supabase.storage
+        .from("gallery")
+        .remove([`round_${selRound}/${fileName}`]);
+      if (error) throw error;
+      setPhotos((prev) => prev.filter((p) => p.name !== fileName));
+    } catch (err) {
+      alert("삭제 실패: " + err.message);
+    }
+  };
+
+  return (
+    <div>
+      <Card title="📸 월례회 갤러리">
+        <select value={selRound} onChange={(e) => setSelRound(e.target.value)}
+          style={{ width: "100%", padding: "9px 10px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 13 }}>
+          <option value="">라운드 선택...</option>
+          {completedRounds.map((r) => (
+            <option key={r.id} value={r.id}>R{r.id} · {r.date} · {r.course}</option>
+          ))}
+        </select>
+      </Card>
+
+      {selRound && (
+        <Card title={(() => { const r = data.rounds.find((x) => x.id === Number(selRound)); return r ? `R${r.id} · ${r.date} · ${r.course}` : ""; })()}
+          badge={`${photos.length}장`} accent={C.purple}>
+          {isAdmin && (
+            <div style={{ marginBottom: 12 }}>
+              <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleUpload}
+                style={{ display: "none" }} />
+              <Btn onClick={() => fileInputRef.current?.click()} disabled={uploading} color={C.purple}>
+                {uploading ? "업로드 중..." : "📷 사진 추가"}
+              </Btn>
+            </div>
+          )}
+
+          {loading ? (
+            <p style={{ color: C.dim, textAlign: "center", padding: 16, fontSize: 12 }}>로딩 중...</p>
+          ) : photos.length === 0 ? (
+            <p style={{ color: C.dim, textAlign: "center", padding: 16, fontSize: 12 }}>
+              사진이 없습니다.{isAdmin ? " 위 버튼으로 사진을 추가하세요." : ""}
+            </p>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+              {photos.map((p) => (
+                <div key={p.name} style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: C.sf, border: `1px solid ${C.border}`, cursor: "pointer" }}
+                  onClick={() => setViewPhoto(p)}>
+                  <img src={p.url} alt="" loading="lazy"
+                    style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} />
+                  {isAdmin && (
+                    <button onClick={(e) => { e.stopPropagation(); handleDelete(p.name); }}
+                      style={{ position: "absolute", top: 4, right: 4, width: 22, height: 22, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.6)", color: C.red, cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* 전체 라운드 미리보기 */}
+      {!selRound && completedRounds.length > 0 && (
+        <Card title="📅 라운드별 사진">
+          <div style={{ fontSize: 11, color: C.dim, marginBottom: 8 }}>라운드를 선택하여 사진을 확인하세요.</div>
+          <div style={{ display: "grid", gap: 4 }}>
+            {completedRounds.map((r) => (
+              <button key={r.id} onClick={() => setSelRound(String(r.id))}
+                style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: C.sf, borderRadius: 8, border: `1px solid ${C.border}`, cursor: "pointer", color: C.text, textAlign: "left" }}>
+                <span style={{ fontSize: 16 }}>📸</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>R{r.id} · {r.date}</div>
+                  <div style={{ fontSize: 10, color: C.dim }}>{r.course} · {r.attendees?.length || 0}명</div>
+                </div>
+                <span style={{ fontSize: 11, color: C.accent }}>보기 →</span>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Photo viewer modal */}
+      {viewPhoto && (
+        <div onClick={() => setViewPhoto(null)}
+          style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.92)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <img src={viewPhoto.url} alt=""
+            style={{ maxWidth: "100%", maxHeight: "90vh", borderRadius: 8, objectFit: "contain" }} />
+          <button onClick={() => setViewPhoto(null)}
+            style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", fontSize: 24, cursor: "pointer", width: 40, height: 40, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+        </div>
+      )}
+    </div>
   );
 }
