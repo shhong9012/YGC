@@ -805,10 +805,13 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   };
 
   // 페어 카운트: 멤버 ID 페어 → 과거 같은 카트로 묶인 횟수 (정회원·게스트 모두)
+  // 최종(complete) 라운드만 카운트 — 중간저장(draft_*) / 편집 중 라운드 제외
   const pairCount = useMemo(() => {
     const map = {};
     const key = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
     data.rounds.forEach((r) => {
+      if (r.status !== "complete") return;
+      if (editingRoundId && r.id === editingRoundId) return;
       (r.cartTeams || []).forEach((cart) => {
         const ids = cart.filter((id) => typeof id === "number");
         for (let i = 0; i < ids.length; i++) {
@@ -820,7 +823,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
       });
     });
     return map;
-  }, [data.rounds]);
+  }, [data.rounds, editingRoundId]);
   // 카트 안 ID(정회원 number | 게스트 tempId string)를 실제 members 테이블 ID로 변환. 신규 게스트는 null.
   const resolveMemberId = (id) => {
     if (typeof id === "number") return id;
