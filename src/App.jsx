@@ -1442,17 +1442,26 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                       </div>
                     )}
                     <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(cartTeams.length, 4)}, 1fr)`, gap: 6 }}>
-                      {cartTeams.map((cart, ci) => (
+                      {cartTeams.map((cart, ci) => {
+                        const avgArr = cart.map((id) => {
+                          if (isGuestId(id)) { const g = guests.find((g) => g.tempId === String(id)); return g?.target || 100; }
+                          return mm[id]?.avg || mm[id]?.target || 100;
+                        });
+                        const cartAvg = avgArr.length > 0 ? (avgArr.reduce((a, b) => a + b, 0) / avgArr.length).toFixed(1) : "-";
+                        const isFour = cart.length === 4;
+                        const frontAvg = isFour ? ((avgArr[0] + avgArr[1]) / 2).toFixed(1) : null;
+                        const backAvg = isFour ? ((avgArr[2] + avgArr[3]) / 2).toFixed(1) : null;
+                        return (
                         <div key={ci} onClick={() => setAssigningCart(ci)}
                           style={{ padding: 10, borderRadius: 8, background: C.sf, border: assigningCart === ci ? `2px solid ${C.purple}` : `1px solid ${C.border}`, cursor: "pointer", minHeight: 80 }}>
-                          <div style={{ fontSize: 11, fontWeight: 600, color: assigningCart === ci ? C.purple : C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 ({cart.length}명)</div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: assigningCart === ci ? C.purple : C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 ({cart.length}명) {cart.length > 0 && <span style={{ fontWeight: 400, color: C.dim }}>avg {cartAvg}</span>}</div>
+                          {isFour && <div style={{ fontSize: 9, color: C.dim, marginBottom: 4 }}>앞 {frontAvg} / 뒤 {backAvg}</div>}
                           {cart.map((id, idx) => {
                             const isG = isGuestId(id);
                             const pairSum = cart.reduce((s, other) => {
                               if (other === id) return s;
                               return s + getPairCount(id, other);
                             }, 0);
-                            const isFour = cart.length === 4;
                             return (
                               <div key={id} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text, borderTop: isFour && idx === 2 ? `1px dashed ${C.border}` : "none", marginTop: isFour && idx === 2 ? 2 : 0, paddingTop: isFour && idx === 2 ? 4 : 2 }}>
                                 <span style={{ color: C.dim, fontSize: 9 }}>{idx + 1}</span>
@@ -1464,7 +1473,8 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                           })}
                           {cart.length === 0 && <div style={{ fontSize: 10, color: C.dim, textAlign: "center", padding: 8 }}>클릭하여 선택</div>}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                     <Btn onClick={addCartSlot} ghost color={C.dim} style={{ width: "100%", marginTop: 6, fontSize: 10 }}>+ 카트 추가</Btn>
                   </div>
