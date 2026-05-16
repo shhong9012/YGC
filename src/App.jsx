@@ -1444,7 +1444,10 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                     <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(cartTeams.length, 4)}, 1fr)`, gap: 6 }}>
                       {cartTeams.map((cart, ci) => {
                         const avgArr = cart.map((id) => {
-                          if (isGuestId(id)) { const g = guests.find((g) => g.tempId === String(id)); return g?.target || 100; }
+                          if (isGuestId(id)) {
+                            const g = guests.find((g) => g.tempId === String(id));
+                            return g?.realId ? (mm[g.realId]?.avg || g.target || 100) : (g?.target || 100);
+                          }
                           return mm[id]?.avg || mm[id]?.target || 100;
                         });
                         const cartAvg = avgArr.length > 0 ? (avgArr.reduce((a, b) => a + b, 0) / avgArr.length).toFixed(1) : "-";
