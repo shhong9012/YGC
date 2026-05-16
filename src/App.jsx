@@ -24,6 +24,12 @@ const EXPENSE_CATEGORIES = [
 ];
 const EXPENSE_TARGET_MIN = 100000;
 const EXPENSE_TARGET_MAX = 150000;
+const AUTO_MODES = [
+  { id: "cart_avg", label: "카트별 평균 밸런스", desc: "카트 간 핸디 평균을 맞춤" },
+  { id: "seat_balance", label: "앞·뒷자리 밸런스", desc: "카트 내 1·2번과 3·4번 평균을 맞춤" },
+  { id: "pair_minimize", label: "페어 히스토리 최소화", desc: "과거 같은 카트였던 페어를 최소화" },
+];
+
 const AWARD_TYPES = [
   { id: "first", label: "1등" },
   { id: "cart_draw", label: "1등 카트내 추첨" },
@@ -711,6 +717,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const [tieBreaks, setTieBreaks] = useState({});
   const [manualMode, setManualMode] = useState(false);
   const [assigningCart, setAssigningCart] = useState(null);
+  const [autoMode, setAutoMode] = useState("cart_avg");
 
   // 드래프트(미완료) 라운드 목록
   const drafts = data.rounds.filter((r) => r.status && r.status !== "complete");
@@ -797,11 +804,49 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     return mm[id]?.avg;
   };
 
-  const makeCartTeams = () => {
+  // 페어 카운트: 정회원 id 페어 → 과거 같은 카트로 묶인 횟수
+  const pairCount = useMemo(() => {
+    const map = {};
+    const key = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
+    data.rounds.forEach((r) => {
+      (r.cartTeams || []).forEach((cart) => {
+        const memberIds = cart.filter((id) => typeof id === "number" && !mm[id]?.isGuest);
+        for (let i = 0; i < memberIds.length; i++) {
+          for (let j = i + 1; j < memberIds.length; j++) {
+            const k = key(memberIds[i], memberIds[j]);
+            map[k] = (map[k] || 0) + 1;
+          }
+        }
+      });
+    });
+    return map;
+  }, [data.rounds, mm]);
+  const pairKey = (a, b) => (String(a) < String(b) ? `${a}_${b}` : `${b}_${a}`);
+  const getPairCount = (a, b) => pairCount[pairKey(a, b)] || 0;
+
+  // 카트 내 좌석 재배치: 앞(0,1) avg ≈ 뒤(2,3) avg
+  const balanceSeatsInCart = (cart, getAvg) => {
+    if (cart.length !== 4) return cart;
+    const [a, b, c, d] = cart;
+    const pairings = [
+      { front: [a, b], back: [c, d] },
+      { front: [a, c], back: [b, d] },
+      { front: [a, d], back: [b, c] },
+    ];
+    let best = pairings[0], bestDiff = Infinity;
+    pairings.forEach((p) => {
+      const fAvg = (getAvg(p.front[0]) + getAvg(p.front[1])) / 2;
+      const bAvg = (getAvg(p.back[0]) + getAvg(p.back[1])) / 2;
+      const diff = Math.abs(fAvg - bAvg);
+      if (diff < bestDiff) { bestDiff = diff; best = p; }
+    });
+    return [...best.front, ...best.back];
+  };
+
+  const makeCartTeams = (mode = "cart_avg") => {
     const totalCount = sel.length + guests.length;
     if (totalCount < 4) return;
     const numCarts = Math.ceil(totalCount / 4);
-    const maxPerCart = Math.ceil(totalCount / numCarts);
     // 동반 쌍 파악: pairedMemberId → [guestTempId, ...]
     const pairedMap = {};
     const unpairedGuestList = [];
@@ -811,36 +856,109 @@ function RoundMgr({ data, db, mm, isAdmin }) {
         pairedMap[g.pairedWith].push(g.tempId);
       } else { unpairedGuestList.push(g); }
     });
-    // 동반 묶음 + 일반 멤버를 하나의 리스트로 (avg/target 기준 정렬)
+    const guestById = Object.fromEntries(guests.map((g) => [g.tempId, g]));
+    const getAvg = (id) => {
+      if (typeof id === "string" || guestById[String(id)]) {
+        const g = guestById[String(id)];
+        return g?.realId ? (mm[g.realId]?.avg || g.target || 100) : (g?.target || 100);
+      }
+      return mm[id]?.avg || mm[id]?.target || 100;
+    };
+    // 유닛 구성 (동반 묶음 + 단일)
     const units = [];
     const pairedMemberIds = new Set(Object.keys(pairedMap).map(Number));
     sel.forEach((id) => {
       const avg = mm[id]?.avg || mm[id]?.target || 100;
       if (pairedMemberIds.has(id)) {
-        // 멤버 + 동반 게스트를 한 묶음으로
         units.push({ ids: [id, ...pairedMap[id]], avg, size: 1 + pairedMap[id].length });
       } else {
         units.push({ ids: [id], avg, size: 1 });
       }
     });
-    // 미지정 게스트도 개별 유닛으로
     unpairedGuestList.forEach((g) => {
       const gAvg = g.realId ? (mm[g.realId]?.avg || g.target || 100) : (g.target || 100);
       units.push({ ids: [g.tempId], avg: gAvg, size: 1 });
     });
-    // avg 기준 정렬 후 스네이크 드래프트
-    units.sort((a, b) => a.avg - b.avg);
-    const carts = Array.from({ length: numCarts }, () => []);
-    const cartSizes = Array(numCarts).fill(0);
-    units.forEach((u) => {
-      // 큰 묶음(동반 페어)은 가장 여유 있는 카트에
-      let bestIdx = 0;
-      for (let i = 1; i < numCarts; i++) {
-        if (cartSizes[i] < cartSizes[bestIdx]) bestIdx = i;
-      }
-      carts[bestIdx].push(...u.ids);
-      cartSizes[bestIdx] += u.size;
-    });
+
+    let carts;
+    if (mode === "pair_minimize") {
+      // 그리디: 큰 묶음(동반) 먼저, 다음은 현재 카트 멤버들과 페어 카운트 합이 가장 낮은 유닛
+      carts = Array.from({ length: numCarts }, () => []);
+      const cartSizes = Array(numCarts).fill(0);
+      // 동반 묶음 먼저 가장 여유있는 카트에
+      const bigUnits = units.filter((u) => u.size > 1).sort((a, b) => b.size - a.size);
+      const singleUnits = units.filter((u) => u.size === 1);
+      bigUnits.forEach((u) => {
+        let bestIdx = 0;
+        for (let i = 1; i < numCarts; i++) if (cartSizes[i] < cartSizes[bestIdx]) bestIdx = i;
+        carts[bestIdx].push(...u.ids);
+        cartSizes[bestIdx] += u.size;
+      });
+      // 단일 유닛: 빈 슬롯 있는 카트 중 현재 멤버들과 페어 카운트 합이 가장 낮은 카트
+      const remainingSingles = [...singleUnits];
+      // 게스트는 페어 데이터 없으므로 마지막에 채움 — 정회원부터
+      remainingSingles.sort((a, b) => {
+        const aGuest = typeof a.ids[0] === "string" || guestById[String(a.ids[0])];
+        const bGuest = typeof b.ids[0] === "string" || guestById[String(b.ids[0])];
+        if (aGuest !== bGuest) return aGuest ? 1 : -1;
+        return 0;
+      });
+      remainingSingles.forEach((u) => {
+        let bestIdx = -1, bestScore = Infinity, bestSlots = -1;
+        for (let i = 0; i < numCarts; i++) {
+          const slots = 4 - cartSizes[i];
+          if (slots < 1) continue;
+          const score = carts[i].reduce((s, id) => {
+            if (typeof id !== "number") return s; // 게스트 페어 데이터 없음
+            return s + getPairCount(id, u.ids[0]);
+          }, 0);
+          if (score < bestScore || (score === bestScore && slots > bestSlots)) {
+            bestScore = score; bestSlots = slots; bestIdx = i;
+          }
+        }
+        if (bestIdx < 0) bestIdx = 0;
+        carts[bestIdx].push(...u.ids);
+        cartSizes[bestIdx] += 1;
+      });
+    } else {
+      // cart_avg / seat_balance: 둘 다 스네이크 드래프트로 카트 구성
+      units.sort((a, b) => a.avg - b.avg);
+      carts = Array.from({ length: numCarts }, () => []);
+      const cartSizes = Array(numCarts).fill(0);
+      units.forEach((u) => {
+        let bestIdx = 0;
+        for (let i = 1; i < numCarts; i++) {
+          if (cartSizes[i] < cartSizes[bestIdx]) bestIdx = i;
+        }
+        carts[bestIdx].push(...u.ids);
+        cartSizes[bestIdx] += u.size;
+      });
+    }
+
+    if (mode === "seat_balance") {
+      // 각 4명 카트의 좌석 재배치 (동반 페어는 같은 그룹 강제)
+      carts = carts.map((cart) => {
+        if (cart.length !== 4) return cart;
+        // 동반 묶음 식별
+        const pairedSet = new Set();
+        cart.forEach((id) => {
+          if (typeof id === "number" && pairedMap[id]) {
+            pairedSet.add(id);
+            pairedMap[id].forEach((gid) => pairedSet.add(gid));
+          }
+        });
+        if (pairedSet.size >= 2 && pairedSet.size <= 3) {
+          // 동반 멤버들을 한 그룹(앞), 나머지를 다른 그룹(뒤)으로 — 평균 차 무관, 같이 묶기 우선
+          const pairedArr = cart.filter((id) => pairedSet.has(id));
+          const others = cart.filter((id) => !pairedSet.has(id));
+          // 동반 2명이면 앞자리, 다른 2명 뒤. 동반 3명이면 앞2 + (앞1, 뒤2 중 한명)... 단순화: 동반 모두 같은 그룹 못 묶이면 그대로 4명으로 처리
+          if (pairedArr.length === 2 && others.length === 2) return [...pairedArr, ...others];
+          return cart; // 복잡한 경우 그대로
+        }
+        return balanceSeatsInCart(cart, getAvg);
+      });
+    }
+
     setCartTeams(carts);
   };
 
@@ -877,6 +995,74 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   };
   const addCartSlot = () => {
     setCartTeams((prev) => [...prev, []]);
+  };
+
+  // 미배치 인원만 자동 배치 (수동 일부 배치 + 나머지 자동)
+  const fillRemainingAuto = () => {
+    const allIds = getAllParticipantIds();
+    const assigned = new Set(cartTeams.flat());
+    const unassignedAll = allIds.filter((id) => !assigned.has(id));
+    if (unassignedAll.length === 0) return;
+    const guestById = Object.fromEntries(guests.map((g) => [g.tempId, g]));
+    const getAvg = (id) => {
+      if (isGuestId(id)) {
+        const g = guestById[id];
+        return g?.realId ? (mm[g.realId]?.avg || g.target || 100) : (g?.target || 100);
+      }
+      return mm[id]?.avg || mm[id]?.target || 100;
+    };
+    const cartAvgOf = (c) => c.length === 0 ? 0 : c.reduce((s, id) => s + getAvg(id), 0) / c.length;
+    const next = cartTeams.map((c) => [...c]);
+    let remaining = [...unassignedAll];
+    // 1) 동반 게스트가 파트너 이미 배치된 카트에 합류 (슬롯 여유 시)
+    for (const id of [...remaining]) {
+      if (!isGuestId(id)) continue;
+      const g = guestById[id];
+      if (!g?.pairedWith) continue;
+      const ci = next.findIndex((c) => c.includes(g.pairedWith));
+      if (ci >= 0 && next[ci].length < 4) {
+        next[ci].push(id);
+        remaining = remaining.filter((x) => x !== id);
+      }
+    }
+    // 2) 남은 인원을 동반 묶음 단위로
+    const units = [];
+    const used = new Set();
+    remaining.forEach((id) => {
+      if (used.has(id)) return;
+      if (!isGuestId(id)) {
+        const pg = guests.filter((g) => g.pairedWith === id && remaining.includes(g.tempId) && !used.has(g.tempId));
+        if (pg.length > 0) {
+          units.push({ ids: [id, ...pg.map((g) => g.tempId)], avg: getAvg(id), size: 1 + pg.length });
+          used.add(id); pg.forEach((g) => used.add(g.tempId));
+          return;
+        }
+      }
+      units.push({ ids: [id], avg: getAvg(id), size: 1 });
+      used.add(id);
+    });
+    // 3) 슬롯 부족 시 카트 추가
+    const totalNeeded = units.reduce((s, u) => s + u.size, 0);
+    let totalSlots = next.reduce((s, c) => s + Math.max(0, 4 - c.length), 0);
+    while (totalSlots < totalNeeded) { next.push([]); totalSlots += 4; }
+    // 4) 큰 묶음(동반) → 빈 슬롯 많은 카트, 그 외 → 현재 평균 가장 낮은 카트
+    units.sort((a, b) => b.size - a.size || b.avg - a.avg);
+    units.forEach((u) => {
+      let bestIdx = -1, bestSlots = -1, bestAvg = Infinity;
+      next.forEach((c, ci) => {
+        const slots = 4 - c.length;
+        if (slots < u.size) return;
+        const ca = cartAvgOf(c);
+        if (u.size > 1) {
+          if (slots > bestSlots) { bestSlots = slots; bestIdx = ci; }
+        } else {
+          if (ca < bestAvg || (ca === bestAvg && slots > bestSlots)) { bestAvg = ca; bestSlots = slots; bestIdx = ci; }
+        }
+      });
+      if (bestIdx < 0) bestIdx = 0;
+      next[bestIdx].push(...u.ids);
+    });
+    setCartTeams(next);
   };
 
   const guestTempIds = useMemo(() => new Set(guests.map((g) => g.tempId)), [guests]);
@@ -1192,7 +1378,12 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                   <div key={g.tempId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 6, marginBottom: 3, background: C.purpleDim, fontSize: 12 }}>
                     <span style={{ color: C.purple, fontWeight: 600 }}>👤 {g.name}</span>
                     <span style={{ fontSize: 10, color: C.dim }}>목표 {g.target}타</span>
-                    {g.pairedWith && <span style={{ fontSize: 10, color: C.mid }}>→ {mm[g.pairedWith]?.name} 동반</span>}
+                    <select value={g.pairedWith || ""}
+                      onChange={(e) => { const v = e.target.value ? Number(e.target.value) : null; setGuests((p) => p.map((x) => x.tempId === g.tempId ? { ...x, pairedWith: v } : x)); }}
+                      style={{ fontSize: 10, padding: "2px 4px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}>
+                      <option value="">동반 없음</option>
+                      {sel.map((mid) => <option key={mid} value={mid}>{mm[mid]?.name} 동반</option>)}
+                    </select>
                     <span style={{ flex: 1 }} />
                     <button onClick={() => removeGuest(g.tempId)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>✕</button>
                   </div>
@@ -1202,8 +1393,16 @@ function RoundMgr({ data, db, mm, isAdmin }) {
           </div>
           {(sel.length + guests.length) >= 2 && (
             <div style={{ marginTop: 10 }}>
+              <div style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}>
+                <span style={{ fontSize: 10, color: C.dim }}>방식</span>
+                <select value={autoMode} onChange={(e) => setAutoMode(e.target.value)}
+                  style={{ flex: 1, fontSize: 11, padding: "5px 6px", background: C.sf, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, outline: "none" }}>
+                  {AUTO_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                </select>
+              </div>
+              <div style={{ fontSize: 10, color: C.mid, marginBottom: 6 }}>{AUTO_MODES.find((m) => m.id === autoMode)?.desc}</div>
               <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                <Btn onClick={() => { if (sel.length + guests.length >= 4) { makeCartTeams(); setManualMode(false); } else { alert("자동 편성은 4명 이상 필요합니다."); } }} color={C.blue} style={{ flex: 1 }}>🚗 자동 편성</Btn>
+                <Btn onClick={() => { if (sel.length + guests.length >= 4) { makeCartTeams(autoMode); setManualMode(false); } else { alert("자동 편성은 4명 이상 필요합니다."); } }} color={C.blue} style={{ flex: 1 }}>🚗 자동 편성</Btn>
                 <Btn onClick={initManualCarts} color={C.purple} ghost style={{ flex: 1 }}>✋ 수동 편성</Btn>
               </div>
               {manualMode && cartTeams.length > 0 && (() => {
@@ -1214,7 +1413,13 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                   <div>
                     {unassigned.length > 0 && (
                       <div style={{ marginBottom: 8, padding: 8, background: C.warnDim, borderRadius: 8, border: `1px solid ${C.warn}30` }}>
-                        <div style={{ fontSize: 10, color: C.warn, marginBottom: 4, fontWeight: 600 }}>미배치 인원 ({unassigned.length}명) — 카트를 선택 후 클릭</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                          <div style={{ fontSize: 10, color: C.warn, fontWeight: 600, flex: 1 }}>미배치 인원 ({unassigned.length}명) — 카트를 선택 후 클릭</div>
+                          <button onClick={fillRemainingAuto}
+                            style={{ padding: "4px 8px", borderRadius: 6, border: `1px solid ${C.blue}`, background: C.card, color: C.blue, fontSize: 10, fontWeight: 600, cursor: "pointer" }}>
+                            🤖 나머지 자동 배치
+                          </button>
+                        </div>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                           {unassigned.map((id) => (
                             <button key={id} onClick={() => assigningCart !== null && addToCart(assigningCart, id)}
@@ -1230,11 +1435,17 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                         <div key={ci} onClick={() => setAssigningCart(ci)}
                           style={{ padding: 10, borderRadius: 8, background: C.sf, border: assigningCart === ci ? `2px solid ${C.purple}` : `1px solid ${C.border}`, cursor: "pointer", minHeight: 80 }}>
                           <div style={{ fontSize: 11, fontWeight: 600, color: assigningCart === ci ? C.purple : C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 ({cart.length}명)</div>
-                          {cart.map((id) => {
+                          {cart.map((id, idx) => {
                             const isG = isGuestId(id);
+                            const pairSum = isG ? 0 : cart.reduce((s, other) => {
+                              if (other === id || isGuestId(other)) return s;
+                              return s + getPairCount(id, other);
+                            }, 0);
+                            const isFour = cart.length === 4;
                             return (
-                              <div key={id} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text }}>
-                                <span style={{ flex: 1 }}>{isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name}</span>
+                              <div key={id} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text, borderTop: isFour && idx === 2 ? `1px dashed ${C.border}` : "none", marginTop: isFour && idx === 2 ? 2 : 0, paddingTop: isFour && idx === 2 ? 4 : 2 }}>
+                                <span style={{ color: C.dim, fontSize: 9 }}>{idx + 1}</span>
+                                <span style={{ flex: 1 }}>{isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name}{pairSum > 0 && <span style={{ color: C.warn, fontSize: 10, marginLeft: 4 }}>🔁{pairSum}</span>}</span>
                                 <button onClick={(e) => { e.stopPropagation(); removeFromCart(id); }}
                                   style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 11, padding: "0 2px" }}>✕</button>
                               </div>
@@ -1256,13 +1467,23 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                       return mm[id]?.avg || mm[id]?.target || 100;
                     });
                     const cartAvg = avgArr.length > 0 ? (avgArr.reduce((a, b) => a + b, 0) / avgArr.length).toFixed(1) : "-";
+                    const isFour = cart.length === 4;
+                    const frontAvg = isFour ? ((avgArr[0] + avgArr[1]) / 2).toFixed(1) : null;
+                    const backAvg = isFour ? ((avgArr[2] + avgArr[3]) / 2).toFixed(1) : null;
                     return (
                       <div key={ci} style={{ padding: 10, borderRadius: 8, background: C.sf, border: `1px solid ${C.border}` }}>
                         <div style={{ fontSize: 11, fontWeight: 600, color: C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 <span style={{ fontWeight: 400, color: C.dim }}>avg {cartAvg}</span></div>
-                        {cart.map((id) => {
+                        {isFour && <div style={{ fontSize: 9, color: C.dim, marginBottom: 4 }}>앞 {frontAvg} / 뒤 {backAvg}</div>}
+                        {cart.map((id, idx) => {
                           const isG = isGuestId(id);
-                          return <div key={id} style={{ fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text }}>
+                          const pairSum = isG ? 0 : cart.reduce((s, other) => {
+                            if (other === id || isGuestId(other)) return s;
+                            return s + getPairCount(id, other);
+                          }, 0);
+                          return <div key={id} style={{ fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text, borderTop: isFour && idx === 2 ? `1px dashed ${C.border}` : "none", marginTop: isFour && idx === 2 ? 2 : 0, paddingTop: isFour && idx === 2 ? 4 : 2 }}>
+                            <span style={{ color: C.dim, fontSize: 9, marginRight: 3 }}>{idx + 1}</span>
                             {isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name} <span style={{ color: C.dim, fontSize: 10 }}>{isG ? "게스트" : (mm[id]?.avg || mm[id]?.target || "-")}</span>
+                            {pairSum > 0 && <span style={{ color: C.warn, fontSize: 10, marginLeft: 4 }}>🔁{pairSum}</span>}
                           </div>;
                         })}
                       </div>
@@ -1271,6 +1492,39 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                 </div>
               )}
             </div>
+          )}
+          {sel.length >= 2 && (
+            <details style={{ marginTop: 10, padding: 8, background: C.sf, borderRadius: 8, border: `1px solid ${C.border}` }}>
+              <summary style={{ fontSize: 11, color: C.mid, cursor: "pointer", fontWeight: 600 }}>📊 페어 히스토리 매트릭스 (정회원, 같은 카트로 라운딩한 횟수)</summary>
+              <div style={{ overflowX: "auto", marginTop: 8 }}>
+                <table style={{ borderCollapse: "collapse", fontSize: 10 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ padding: "2px 4px" }}></th>
+                      {sel.map((id) => (
+                        <th key={id} style={{ padding: "2px", color: C.dim, fontWeight: 400, fontSize: 9, minWidth: 22, maxWidth: 22, textAlign: "center", verticalAlign: "bottom" }}>
+                          <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", whiteSpace: "nowrap" }}>{mm[id]?.name}</div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sel.map((rid) => (
+                      <tr key={rid}>
+                        <td style={{ padding: "2px 6px", color: C.mid, fontSize: 10, textAlign: "right", whiteSpace: "nowrap" }}>{mm[rid]?.name}</td>
+                        {sel.map((cid) => {
+                          if (rid === cid) return <td key={cid} style={{ background: C.border }}></td>;
+                          const cnt = getPairCount(rid, cid);
+                          const intensity = Math.min(cnt / 5, 1);
+                          const bg = cnt === 0 ? "transparent" : `rgba(245,158,11,${0.12 + intensity * 0.45})`;
+                          return <td key={cid} style={{ padding: "2px", textAlign: "center", background: bg, color: cnt === 0 ? C.dim : C.text, fontSize: 10, minWidth: 22 }}>{cnt || ""}</td>;
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
           )}
           {(sel.length + guests.length) > 0 && (
             <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
