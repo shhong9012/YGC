@@ -804,25 +804,36 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     return mm[id]?.avg;
   };
 
-  // 페어 카운트: 정회원 id 페어 → 과거 같은 카트로 묶인 횟수
+  // 페어 카운트: 멤버 ID 페어 → 과거 같은 카트로 묶인 횟수 (정회원·게스트 모두)
   const pairCount = useMemo(() => {
     const map = {};
     const key = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
     data.rounds.forEach((r) => {
       (r.cartTeams || []).forEach((cart) => {
-        const memberIds = cart.filter((id) => typeof id === "number" && !mm[id]?.isGuest);
-        for (let i = 0; i < memberIds.length; i++) {
-          for (let j = i + 1; j < memberIds.length; j++) {
-            const k = key(memberIds[i], memberIds[j]);
+        const ids = cart.filter((id) => typeof id === "number");
+        for (let i = 0; i < ids.length; i++) {
+          for (let j = i + 1; j < ids.length; j++) {
+            const k = key(ids[i], ids[j]);
             map[k] = (map[k] || 0) + 1;
           }
         }
       });
     });
     return map;
-  }, [data.rounds, mm]);
-  const pairKey = (a, b) => (String(a) < String(b) ? `${a}_${b}` : `${b}_${a}`);
-  const getPairCount = (a, b) => pairCount[pairKey(a, b)] || 0;
+  }, [data.rounds]);
+  // 카트 안 ID(정회원 number | 게스트 tempId string)를 실제 members 테이블 ID로 변환. 신규 게스트는 null.
+  const resolveMemberId = (id) => {
+    if (typeof id === "number") return id;
+    const g = guests.find((g) => g.tempId === String(id));
+    return g?.realId ?? null;
+  };
+  const pairKey = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
+  const getPairCount = (a, b) => {
+    const ra = resolveMemberId(a);
+    const rb = resolveMemberId(b);
+    if (ra == null || rb == null) return 0;
+    return pairCount[pairKey(ra, rb)] || 0;
+  };
 
   // 카트 내 좌석 재배치: 앞(0,1) avg ≈ 뒤(2,3) avg
   const balanceSeatsInCart = (cart, getAvg) => {
@@ -895,12 +906,12 @@ function RoundMgr({ data, db, mm, isAdmin }) {
         cartSizes[bestIdx] += u.size;
       });
       // 단일 유닛: 빈 슬롯 있는 카트 중 현재 멤버들과 페어 카운트 합이 가장 낮은 카트
+      // 과거 데이터 없는 신규 게스트(realId 없음)는 뒤로 — 기준이 0이라 의미가 약함
       const remainingSingles = [...singleUnits];
-      // 게스트는 페어 데이터 없으므로 마지막에 채움 — 정회원부터
       remainingSingles.sort((a, b) => {
-        const aGuest = typeof a.ids[0] === "string" || guestById[String(a.ids[0])];
-        const bGuest = typeof b.ids[0] === "string" || guestById[String(b.ids[0])];
-        if (aGuest !== bGuest) return aGuest ? 1 : -1;
+        const aNew = resolveMemberId(a.ids[0]) == null;
+        const bNew = resolveMemberId(b.ids[0]) == null;
+        if (aNew !== bNew) return aNew ? 1 : -1;
         return 0;
       });
       remainingSingles.forEach((u) => {
@@ -908,10 +919,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
         for (let i = 0; i < numCarts; i++) {
           const slots = 4 - cartSizes[i];
           if (slots < 1) continue;
-          const score = carts[i].reduce((s, id) => {
-            if (typeof id !== "number") return s; // 게스트 페어 데이터 없음
-            return s + getPairCount(id, u.ids[0]);
-          }, 0);
+          const score = carts[i].reduce((s, id) => s + getPairCount(id, u.ids[0]), 0);
           if (score < bestScore || (score === bestScore && slots > bestSlots)) {
             bestScore = score; bestSlots = slots; bestIdx = i;
           }
@@ -1437,8 +1445,8 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                           <div style={{ fontSize: 11, fontWeight: 600, color: assigningCart === ci ? C.purple : C.blue, marginBottom: 4 }}>🚗 {ci + 1}카트 ({cart.length}명)</div>
                           {cart.map((id, idx) => {
                             const isG = isGuestId(id);
-                            const pairSum = isG ? 0 : cart.reduce((s, other) => {
-                              if (other === id || isGuestId(other)) return s;
+                            const pairSum = cart.reduce((s, other) => {
+                              if (other === id) return s;
                               return s + getPairCount(id, other);
                             }, 0);
                             const isFour = cart.length === 4;
@@ -1476,8 +1484,8 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                         {isFour && <div style={{ fontSize: 9, color: C.dim, marginBottom: 4 }}>앞 {frontAvg} / 뒤 {backAvg}</div>}
                         {cart.map((id, idx) => {
                           const isG = isGuestId(id);
-                          const pairSum = isG ? 0 : cart.reduce((s, other) => {
-                            if (other === id || isGuestId(other)) return s;
+                          const pairSum = cart.reduce((s, other) => {
+                            if (other === id) return s;
                             return s + getPairCount(id, other);
                           }, 0);
                           return <div key={id} style={{ fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text, borderTop: isFour && idx === 2 ? `1px dashed ${C.border}` : "none", marginTop: isFour && idx === 2 ? 2 : 0, paddingTop: isFour && idx === 2 ? 4 : 2 }}>
@@ -1493,39 +1501,47 @@ function RoundMgr({ data, db, mm, isAdmin }) {
               )}
             </div>
           )}
-          {sel.length >= 2 && (
-            <details style={{ marginTop: 10, padding: 8, background: C.sf, borderRadius: 8, border: `1px solid ${C.border}` }}>
-              <summary style={{ fontSize: 11, color: C.mid, cursor: "pointer", fontWeight: 600 }}>📊 페어 히스토리 매트릭스 (정회원, 같은 카트로 라운딩한 횟수)</summary>
-              <div style={{ overflowX: "auto", marginTop: 8 }}>
-                <table style={{ borderCollapse: "collapse", fontSize: 10 }}>
-                  <thead>
-                    <tr>
-                      <th style={{ padding: "2px 4px" }}></th>
-                      {sel.map((id) => (
-                        <th key={id} style={{ padding: "2px", color: C.dim, fontWeight: 400, fontSize: 9, minWidth: 22, maxWidth: 22, textAlign: "center", verticalAlign: "bottom" }}>
-                          <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", whiteSpace: "nowrap" }}>{mm[id]?.name}</div>
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sel.map((rid) => (
-                      <tr key={rid}>
-                        <td style={{ padding: "2px 6px", color: C.mid, fontSize: 10, textAlign: "right", whiteSpace: "nowrap" }}>{mm[rid]?.name}</td>
-                        {sel.map((cid) => {
-                          if (rid === cid) return <td key={cid} style={{ background: C.border }}></td>;
-                          const cnt = getPairCount(rid, cid);
-                          const intensity = Math.min(cnt / 5, 1);
-                          const bg = cnt === 0 ? "transparent" : `rgba(245,158,11,${0.12 + intensity * 0.45})`;
-                          return <td key={cid} style={{ padding: "2px", textAlign: "center", background: bg, color: cnt === 0 ? C.dim : C.text, fontSize: 10, minWidth: 22 }}>{cnt || ""}</td>;
-                        })}
+          {(() => {
+            // 매트릭스 대상: 정회원 + 이미 등록된 게스트(realId 있음). 신규 게스트는 과거 데이터 없어 제외
+            const matrixEntries = [
+              ...sel.map((id) => ({ id, name: mm[id]?.name, isG: false })),
+              ...guests.filter((g) => g.realId).map((g) => ({ id: g.realId, name: g.name, isG: true })),
+            ];
+            if (matrixEntries.length < 2) return null;
+            return (
+              <details style={{ marginTop: 10, padding: 8, background: C.sf, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                <summary style={{ fontSize: 11, color: C.mid, cursor: "pointer", fontWeight: 600 }}>📊 페어 히스토리 매트릭스 (같은 카트로 라운딩한 횟수)</summary>
+                <div style={{ overflowX: "auto", marginTop: 8 }}>
+                  <table style={{ borderCollapse: "collapse", fontSize: 10 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ padding: "2px 4px" }}></th>
+                        {matrixEntries.map((e) => (
+                          <th key={e.id} style={{ padding: "2px", color: e.isG ? C.purple : C.dim, fontWeight: 400, fontSize: 9, minWidth: 22, maxWidth: 22, textAlign: "center", verticalAlign: "bottom" }}>
+                            <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", whiteSpace: "nowrap" }}>{e.isG ? `👤${e.name}` : e.name}</div>
+                          </th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          )}
+                    </thead>
+                    <tbody>
+                      {matrixEntries.map((re) => (
+                        <tr key={re.id}>
+                          <td style={{ padding: "2px 6px", color: re.isG ? C.purple : C.mid, fontSize: 10, textAlign: "right", whiteSpace: "nowrap" }}>{re.isG ? `👤${re.name}` : re.name}</td>
+                          {matrixEntries.map((ce) => {
+                            if (re.id === ce.id) return <td key={ce.id} style={{ background: C.border }}></td>;
+                            const cnt = getPairCount(re.id, ce.id);
+                            const intensity = Math.min(cnt / 5, 1);
+                            const bg = cnt === 0 ? "transparent" : `rgba(245,158,11,${0.12 + intensity * 0.45})`;
+                            return <td key={ce.id} style={{ padding: "2px", textAlign: "center", background: bg, color: cnt === 0 ? C.dim : C.text, fontSize: 10, minWidth: 22 }}>{cnt || ""}</td>;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            );
+          })()}
           {(sel.length + guests.length) > 0 && (
             <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
               <Btn onClick={() => saveDraft("draft_team")} disabled={saving || !date} color={C.warn} style={{ flex: 1 }}>{saving ? "저장 중..." : "💾 팀 중간저장"}</Btn>
