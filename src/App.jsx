@@ -1504,9 +1504,16 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                             if (other === id) return s;
                             return s + getPairCount(id, other);
                           }, 0);
+                          let handi;
+                          if (isG) {
+                            const g = guests.find((g) => g.tempId === String(id));
+                            handi = g?.realId ? (mm[g.realId]?.avg || g.target || "-") : (g?.target || "-");
+                          } else {
+                            handi = mm[id]?.avg || mm[id]?.target || "-";
+                          }
                           return <div key={id} style={{ fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text, borderTop: isFour && idx === 2 ? `1px dashed ${C.border}` : "none", marginTop: isFour && idx === 2 ? 2 : 0, paddingTop: isFour && idx === 2 ? 4 : 2 }}>
                             <span style={{ color: C.dim, fontSize: 9, marginRight: 3 }}>{idx + 1}</span>
-                            {isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name} <span style={{ color: C.dim, fontSize: 10 }}>{isG ? "게스트" : (mm[id]?.avg || mm[id]?.target || "-")}</span>
+                            {isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name} <span style={{ color: C.dim, fontSize: 10 }}>{handi}</span>
                             {pairSum > 0 && <span style={{ color: C.warn, fontSize: 10, marginLeft: 4 }}>🔁{pairSum}</span>}
                           </div>;
                         })}
