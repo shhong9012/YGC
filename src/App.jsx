@@ -28,6 +28,7 @@ const AUTO_MODES = [
   { id: "cart_avg", label: "카트별 평균 밸런스", desc: "카트 간 핸디 평균을 맞춤" },
   { id: "seat_balance", label: "앞·뒷자리 밸런스", desc: "카트 내 1·2번과 3·4번 평균을 맞춤" },
   { id: "pair_minimize", label: "페어 히스토리 최소화", desc: "과거 같은 카트였던 페어를 최소화" },
+  { id: "ab_team", label: "A/B 팀전 (2:2)", desc: "A·B 팀을 수동 지정 → 카트마다 A 2명·B 2명으로 편성" },
 ];
 
 const AWARD_TYPES = [
@@ -718,6 +719,10 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const [manualMode, setManualMode] = useState(false);
   const [assigningCart, setAssigningCart] = useState(null);
   const [autoMode, setAutoMode] = useState("cart_avg");
+  // A/B 팀전: 참가자별 팀 배정(id문자열 → "A"|"B") + 카트 편성 옵션 토글
+  const [teamAssign, setTeamAssign] = useState({});
+  const [abBalance, setAbBalance] = useState(true);
+  const [abHistory, setAbHistory] = useState(true);
 
   // 드래프트(미완료) 라운드 목록
   const drafts = data.rounds.filter((r) => r.status && r.status !== "complete");
@@ -726,6 +731,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     setStep(1); setDate(""); setCourse("태광CC"); setSel([]); setScores({});
     setCartTeams([]); setAwards([]); setGuests([]); setEditingRoundId(null);
     setTieBreaks({}); setManualMode(false); setAssigningCart(null);
+    setTeamAssign({});
   };
 
   const loadDraft = (round) => {
@@ -765,6 +771,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     else if (round.status === "complete") setStep(2); // 완료된 라운드 편집 → 스코어부터
     else setStep(1);
     setTieBreaks({});
+    setTeamAssign({});
   };
 
   const active = data.members.filter((m) => m.active && !m.isGuest);
@@ -802,6 +809,12 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const getParticipantAvg = (id) => {
     if (isGuestId(id)) return null;
     return mm[id]?.avg;
+  };
+  // 정회원·게스트 공통 핸디 평균(없으면 목표타수, 그래도 없으면 100)
+  const getAvgId = (id) => {
+    const g = guests.find((g) => g.tempId === String(id));
+    if (g) return g.realId ? (mm[g.realId]?.avg || g.target || 100) : (g.target || 100);
+    return mm[id]?.avg || mm[id]?.target || 100;
   };
 
   // 페어 카운트: 멤버 ID 페어 → 과거 같은 카트로 묶인 횟수 (정회원·게스트 모두)
@@ -971,6 +984,103 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     }
 
     setCartTeams(carts);
+  };
+
+  // A/B 팀전 모드 진입 시: 미배정 참가자를 핸디 균형 맞춰 A/B에 교대 시딩 + 빠진 인원 정리
+  // (동반 게스트는 파트너 팀을 따라가므로 개별 배정에서 제외)
+  const pairedGuestIds = useMemo(
+    () => new Set(guests.filter((g) => g.pairedWith && sel.includes(g.pairedWith)).map((g) => g.tempId)),
+    [guests, sel]
+  );
+  useEffect(() => {
+    if (autoMode !== "ab_team") return;
+    setTeamAssign((prev) => {
+      const ids = [...sel.map(String), ...guests.map((g) => g.tempId)].filter((id) => !pairedGuestIds.has(id));
+      const idSet = new Set(ids);
+      const next = {};
+      Object.keys(prev).forEach((k) => { if (idSet.has(k)) next[k] = prev[k]; });
+      const missing = ids.filter((id) => !(id in next));
+      if (missing.length === 0) return next;
+      const sorted = [...missing].sort((a, b) => getAvgId(b) - getAvgId(a));
+      let aSum = Object.entries(next).filter(([, v]) => v === "A").reduce((s, [k]) => s + getAvgId(k), 0);
+      let bSum = Object.entries(next).filter(([, v]) => v === "B").reduce((s, [k]) => s + getAvgId(k), 0);
+      let aCnt = Object.values(next).filter((v) => v === "A").length;
+      let bCnt = Object.values(next).filter((v) => v === "B").length;
+      sorted.forEach((id) => {
+        // 인원 차이가 크면 적은 쪽, 아니면 핸디 합이 적은 쪽에 배정
+        const toA = aCnt < bCnt || (aCnt === bCnt && aSum <= bSum);
+        if (toA) { next[id] = "A"; aSum += getAvgId(id); aCnt++; }
+        else { next[id] = "B"; bSum += getAvgId(id); bCnt++; }
+      });
+      return next;
+    });
+  }, [autoMode, sel, guests, pairedGuestIds]);
+
+  // A/B 팀전: 수동 지정한 팀을 바탕으로 카트마다 A 2명·B 2명(2:2)으로 편성
+  // abBalance: 카트별 핸디 밸런스, abHistory: 매치 히스토리(페어) 최소화 — 각각 on/off
+  const makeABCarts = () => {
+    const totalCount = sel.length + guests.length;
+    if (totalCount < 4) { alert("자동 편성은 4명 이상 필요합니다."); return; }
+    // 동반 묶음: 멤버 → [게스트tempId]
+    const pairedMap = {};
+    const unpairedGuests = [];
+    guests.forEach((g) => {
+      if (g.pairedWith && sel.includes(g.pairedWith)) (pairedMap[g.pairedWith] = pairedMap[g.pairedWith] || []).push(g.tempId);
+      else unpairedGuests.push(g);
+    });
+    const teamOf = (id) => teamAssign[String(id)] || "A";
+    // 유닛 구성: 동반 묶음은 멤버 팀을 따름
+    const pairedMemberIds = new Set(Object.keys(pairedMap).map(Number));
+    const units = [];
+    sel.forEach((id) => {
+      const ids = pairedMemberIds.has(id) ? [id, ...pairedMap[id]] : [id];
+      const avg = ids.reduce((s, x) => s + getAvgId(x), 0) / ids.length;
+      units.push({ ids, size: ids.length, avg, team: teamOf(id) });
+    });
+    unpairedGuests.forEach((g) => units.push({ ids: [g.tempId], size: 1, avg: getAvgId(g.tempId), team: teamOf(g.tempId) }));
+
+    const aUnits = units.filter((u) => u.team === "A");
+    const bUnits = units.filter((u) => u.team === "B");
+    const totalA = aUnits.reduce((s, u) => s + u.size, 0);
+    const totalB = bUnits.reduce((s, u) => s + u.size, 0);
+    if (totalA === 0 || totalB === 0) { alert("A·B 양 팀에 인원을 배정해 주세요."); return; }
+    const numCarts = Math.max(1, Math.ceil(totalCount / 4));
+    // 팀별 카트 정원을 최대한 균등 분배 (앞쪽 카트부터 1명씩 더)
+    const distribute = (n, k) => { const base = Math.floor(n / k), rem = n % k; return Array.from({ length: k }, (_, i) => base + (i < rem ? 1 : 0)); };
+    const capA = distribute(totalA, numCarts);
+    const capB = distribute(totalB, numCarts);
+
+    const carts = Array.from({ length: numCarts }, () => ({ A: [], B: [] }));
+    const norm = (arr) => { const mn = Math.min(...arr), mx = Math.max(...arr), d = mx - mn; return arr.map((v) => (d ? (v - mn) / d : 0)); };
+    const placeUnits = (teamUnits, cap, teamKey) => {
+      // 큰 묶음(동반) 먼저, 그다음 핸디 높은 순 — 극단값을 먼저 분산
+      const sorted = [...teamUnits].sort((a, b) => b.size - a.size || b.avg - a.avg);
+      sorted.forEach((u) => {
+        let pool = [];
+        for (let i = 0; i < numCarts; i++) if (carts[i][teamKey].length + u.size <= cap[i]) pool.push(i);
+        if (pool.length === 0) pool = Array.from({ length: numCarts }, (_, i) => i); // 정원 초과 fallback
+        const bRaw = pool.map((i) => carts[i][teamKey].reduce((s, id) => s + getAvgId(id), 0)); // 현재 팀 핸디 합 → 적은 쪽에
+        const hRaw = pool.map((i) => {
+          const members = [...carts[i].A, ...carts[i].B];
+          return u.ids.reduce((s, uid) => s + members.reduce((ss, mid) => ss + getPairCount(uid, mid), 0), 0);
+        });
+        const bN = abBalance ? norm(bRaw) : pool.map(() => 0);
+        const hN = abHistory ? norm(hRaw) : pool.map(() => 0);
+        let bestIdx = pool[0], bestCost = Infinity;
+        pool.forEach((i, k) => {
+          const room = cap[i] - carts[i][teamKey].length;
+          const cost = bN[k] + hN[k] - room * 1e-6; // 동점 시 여유 많은 카트 우선
+          if (cost < bestCost) { bestCost = cost; bestIdx = i; }
+        });
+        carts[bestIdx][teamKey].push(...u.ids);
+      });
+    };
+    placeUnits(aUnits, capA, "A");
+    placeUnits(bUnits, capB, "B");
+
+    // 좌석: A(1·2번) → B(3·4번) 순으로 펼침 — 4명 카트는 앞=A / 뒤=B로 표시됨
+    setCartTeams(carts.map((c) => [...c.A, ...c.B]));
+    setManualMode(false);
   };
 
   // 기존 게스트 재참가
@@ -1412,8 +1522,58 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                 </select>
               </div>
               <div style={{ fontSize: 10, color: C.mid, marginBottom: 6 }}>{AUTO_MODES.find((m) => m.id === autoMode)?.desc}</div>
+              {autoMode === "ab_team" && (() => {
+                const teamOfPart = (id) => teamAssign[String(id)] || "A";
+                const teamA = [], teamB = [];
+                sel.forEach((id) => (teamOfPart(id) === "A" ? teamA : teamB).push(id));
+                guests.forEach((g) => {
+                  const t = pairedGuestIds.has(g.tempId) ? teamOfPart(g.pairedWith) : teamOfPart(g.tempId);
+                  (t === "A" ? teamA : teamB).push(g.tempId);
+                });
+                const avgOf = (arr) => (arr.length ? (arr.reduce((s, id) => s + getAvgId(id), 0) / arr.length).toFixed(1) : "-");
+                const assignable = [...sel, ...guests.filter((g) => !pairedGuestIds.has(g.tempId)).map((g) => g.tempId)];
+                const toggle = (id) => setTeamAssign((p) => ({ ...p, [String(id)]: (p[String(id)] || "A") === "A" ? "B" : "A" }));
+                return (
+                  <div style={{ marginBottom: 8, padding: 8, background: C.sf, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                      <div style={{ flex: 1, textAlign: "center", fontSize: 10, color: C.blue, fontWeight: 600 }}>A팀 {teamA.length}명 · avg {avgOf(teamA)}</div>
+                      <div style={{ flex: 1, textAlign: "center", fontSize: 10, color: C.warn, fontWeight: 600 }}>B팀 {teamB.length}명 · avg {avgOf(teamB)}</div>
+                    </div>
+                    <div style={{ fontSize: 9, color: C.dim, marginBottom: 5 }}>이름을 눌러 A ↔ B 팀 변경</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+                      {assignable.map((id) => {
+                        const t = teamOfPart(id);
+                        const isG = isGuestId(id);
+                        const col = t === "A" ? C.blue : C.warn;
+                        return (
+                          <button key={id} onClick={() => toggle(id)}
+                            style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 12, border: `1px solid ${col}`, background: C.card, color: isG ? C.purple : C.text, fontSize: 11, cursor: "pointer" }}>
+                            <span style={{ fontWeight: 700, color: col, fontSize: 10 }}>{t}</span>
+                            {isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {guests.some((g) => pairedGuestIds.has(g.tempId)) && (
+                      <div style={{ fontSize: 9, color: C.dim, marginBottom: 8 }}>
+                        동반 게스트는 파트너 팀을 따릅니다: {guests.filter((g) => pairedGuestIds.has(g.tempId)).map((g) => `👤${g.name}(${teamOfPart(g.pairedWith)})`).join(", ")}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 12 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.text, cursor: "pointer" }}>
+                        <input type="checkbox" checked={abBalance} onChange={(e) => setAbBalance(e.target.checked)} style={{ cursor: "pointer" }} />
+                        카트별 밸런스
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.text, cursor: "pointer" }}>
+                        <input type="checkbox" checked={abHistory} onChange={(e) => setAbHistory(e.target.checked)} style={{ cursor: "pointer" }} />
+                        매치 히스토리 최소화
+                      </label>
+                    </div>
+                  </div>
+                );
+              })()}
               <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                <Btn onClick={() => { if (sel.length + guests.length >= 4) { makeCartTeams(autoMode); setManualMode(false); } else { alert("자동 편성은 4명 이상 필요합니다."); } }} color={C.blue} style={{ flex: 1 }}>🚗 자동 편성</Btn>
+                <Btn onClick={() => { if (sel.length + guests.length < 4) { alert("자동 편성은 4명 이상 필요합니다."); return; } if (autoMode === "ab_team") makeABCarts(); else { makeCartTeams(autoMode); setManualMode(false); } }} color={C.blue} style={{ flex: 1 }}>🚗 자동 편성</Btn>
                 <Btn onClick={initManualCarts} color={C.purple} ghost style={{ flex: 1 }}>✋ 수동 편성</Btn>
               </div>
               {manualMode && cartTeams.length > 0 && (() => {
