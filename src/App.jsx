@@ -637,7 +637,19 @@ function Medal({ rank }) {
 // ═══ CHAMPIONSHIP STANDINGS ═══
 function Standings({ data, mm, standings }) {
   const scored = standings.filter((s) => s.rounds > 0);
-  const totalR = data.rounds.filter((r) => r.status === "complete" && r.scores?.length).length;
+  const pointRounds = data.rounds
+    .filter((r) => r.status === "complete" && r.scores?.length)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id)
+    .map((round) => ({
+      ...round,
+      recipients: standings.flatMap((member) => {
+        const result = member.history.find((h) => h.roundId === round.id);
+        return result?.pts > 0 && mm[member.id]
+          ? [{ ...result, memberId: member.id, name: mm[member.id].name }]
+          : [];
+      }).sort((a, b) => a.rank - b.rank),
+    }));
+  const totalR = pointRounds.length;
   return (
     <div>
       <Card title="🏎️ F1 포인트 시스템 (제11조)" badge="상위 6명">
@@ -680,22 +692,32 @@ function Standings({ data, mm, standings }) {
         )}
       </Card>
 
-      {scored.length > 0 && (
-        <Card title="📊 라운드별 포인트 흐름">
-          {scored.slice(0, 8).map((s) => {
-            const m = mm[s.id]; if (!m) return null;
-            return (
-              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <span style={{ fontSize: 11, minWidth: 44, textAlign: "right", color: C.mid }}>{m.name}</span>
-                <div style={{ flex: 1, display: "flex", gap: 2 }}>
-                  {s.history.map((h, i) => (
-                    <div key={i} title={`R${h.roundId} ${h.score}타 → +${h.pts}pts`} style={{ height: 20, minWidth: 16, borderRadius: 3, background: h.pts >= 15 ? C.accent : h.pts >= 8 ? C.blue : C.dim, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 8, fontWeight: 700, color: "#000", opacity: h.pts > 0 ? 1 : .3 }}>{h.pts || ""}</div>
-                  ))}
+      {pointRounds.length > 0 && (
+        <Card title="📊 라운드별 포인트 획득 현황">
+          <p style={{ margin: "0 0 10px", fontSize: 11, color: C.mid }}>각 라운드에서 포인트를 획득한 회원입니다.</p>
+          <div style={{ display: "grid", gap: 10 }}>
+            {pointRounds.map((round) => (
+              <section key={round.id} aria-label={`R${round.id} 포인트 획득 현황`}
+                style={{ padding: 10, background: C.sf, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "4px 8px", marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: C.accent }}>R{round.id}</span>
+                  <span style={{ fontSize: 11, color: C.text }}>{round.date}</span>
+                  <span style={{ fontSize: 10, color: C.mid, overflowWrap: "anywhere" }}>{round.course}</span>
                 </div>
-                <span style={{ fontSize: 13, fontWeight: 800, color: C.accent, minWidth: 30, textAlign: "right" }}>{s.total}</span>
-              </div>
-            );
-          })}
+                {round.recipients.length > 0 ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 5 }}>
+                    {round.recipients.map((recipient) => (
+                      <div key={recipient.memberId} style={{ display: "flex", alignItems: "center", gap: 5, padding: "8px 6px", borderRadius: 6, background: C.card }}>
+                        <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, color: recipient.rank <= 3 ? [C.gold, C.silver, C.bronze][recipient.rank - 1] : C.mid }}>{recipient.rank}위</span>
+                        <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 500, overflowWrap: "anywhere" }}>{recipient.name}</span>
+                        <span style={{ flexShrink: 0, fontSize: 13, fontWeight: 800, color: C.accent }}>+{recipient.pts}<span style={{ fontSize: 9, fontWeight: 400, marginLeft: 2 }}>pts</span></span>
+                      </div>
+                    ))}
+                  </div>
+                ) : <p style={{ margin: 0, fontSize: 11, color: C.mid }}>포인트를 획득한 회원이 없습니다.</p>}
+              </section>
+            ))}
+          </div>
         </Card>
       )}
     </div>
