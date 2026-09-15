@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { supabase } from "./lib/supabase";
 import { arrangeCarts, seedTeams, validateCarts } from "./lib/cartPlacement";
+import { buildPairHistory, pairKey } from "./lib/pairHistory";
+import { buildPointsMatrix } from "./lib/pointsMatrix";
 
 // ═══ RULES from 정관(251119) ═══
 const F1 = [
@@ -28,7 +30,7 @@ const EXPENSE_TARGET_MAX = 150000;
 const AUTO_MODES = [
   { id: "cart_avg", label: "카트별 평균 밸런스", desc: "동반자를 같은 카트에 유지하고, 카트별 인원과 평균타수를 고르게 편성" },
   { id: "seat_balance", label: "앞·뒷자리 밸런스", desc: "카트별 평균을 맞춘 뒤 앞·뒷자리 평균 조정 · 동반 2명은 같은 앞/뒤 좌석 유지" },
-  { id: "pair_minimize", label: "페어 히스토리 최소화", desc: "동반자를 유지하면서 과거 같은 카트였던 조합을 줄임 · 평균타수는 고려하지 않음" },
+  { id: "pair_minimize", label: "같은 카트 이력 최소화", desc: "동반자를 유지하면서 과거 같은 카트였던 조합을 줄임 · 평균타수는 고려하지 않음" },
   { id: "ab_team", label: "A/B 팀전 (2:2)", desc: "4명 카트는 A 2명·B 2명 · 동반자는 같은 팀 · 남는 인원도 팀별 최대 2명" },
 ];
 
@@ -721,7 +723,50 @@ function Standings({ data, mm, standings }) {
           </div>
         </Card>
       )}
+      {pointRounds.length > 0 && <PointsMatrix rounds={data.rounds} standings={standings} mm={mm} />}
     </div>
+  );
+}
+
+function PointsMatrix({ rounds, standings, mm }) {
+  const matrix = buildPointsMatrix(rounds, standings, mm);
+  const cellStyle = { padding: "9px 8px", textAlign: "center", borderBottom: `1px solid ${C.border}`, minWidth: 60 };
+  return (
+    <Card title="📈 회원별 라운드 포인트">
+      <p style={{ margin: "0 0 10px", fontSize: 11, color: C.mid, lineHeight: 1.6 }}>각 라운드에서 받은 포인트 · 0 = 포인트 없음 · — = 미참석 · 미입력 = 스코어 없음<br/>좌우로 밀어 모든 라운드를 확인하세요.</p>
+      <div role="region" aria-label="회원별 라운드 포인트 표" tabIndex={0} style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 8 }}>
+        <table aria-label="회원별 라운드 포인트" style={{ width: "100%", borderCollapse: "separate", borderSpacing: 0, fontSize: 12 }}>
+          <thead>
+            <tr>
+              <th scope="col" style={{ ...cellStyle, position: "sticky", left: 0, zIndex: 2, background: C.sf, textAlign: "left", minWidth: 78, color: C.mid }}>회원</th>
+              {matrix.columns.map((round) => (
+                <th key={round.id} scope="col" style={{ ...cellStyle, background: C.sf, color: C.text, whiteSpace: "nowrap" }}>
+                  R{round.id}<span style={{ display: "block", fontSize: 9, fontWeight: 400, color: C.mid, marginTop: 3 }}>{round.date.slice(5).replace("-", "/")}</span>
+                </th>
+              ))}
+              <th scope="col" style={{ ...cellStyle, position: "sticky", right: 0, zIndex: 2, background: C.sf, color: C.accent }}>합계</th>
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.rows.map((member, index) => {
+              const background = index % 2 ? C.sf : C.card;
+              return (
+                <tr key={member.id}>
+                  <th scope="row" style={{ ...cellStyle, position: "sticky", left: 0, zIndex: 1, background, textAlign: "left", fontWeight: 500, whiteSpace: "nowrap" }}>{member.name}</th>
+                  {member.cells.map((cell) => (
+                    <td key={cell.roundId} title={`${member.name} · R${cell.roundId}${cell.rank ? ` · ${cell.rank}위` : ""}`}
+                      style={{ ...cellStyle, background, color: cell.points > 0 ? C.accent : C.mid, fontWeight: cell.points > 0 ? 700 : 400 }}>
+                      {cell.state === "scored" ? cell.points : cell.state === "pending" ? <span style={{ fontSize: 10 }}>미입력</span> : "—"}
+                    </td>
+                  ))}
+                  <td style={{ ...cellStyle, position: "sticky", right: 0, zIndex: 1, background, fontWeight: 800, color: C.accent }}>{member.total}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
 
@@ -842,33 +887,16 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     return mm[id]?.avg || mm[id]?.target || 100;
   };
 
-  // 페어 카운트: 멤버 ID 페어 → 과거 같은 카트로 묶인 횟수 (정회원·게스트 모두)
-  // 최종(complete) 라운드만 카운트 — 중간저장(draft_*) / 편집 중 라운드 제외
-  const pairCount = useMemo(() => {
-    const map = {};
-    const key = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
-    data.rounds.forEach((r) => {
-      if (r.status !== "complete") return;
-      if (editingRoundId && r.id === editingRoundId) return;
-      (r.cartTeams || []).forEach((cart) => {
-        const ids = cart.filter((id) => typeof id === "number");
-        for (let i = 0; i < ids.length; i++) {
-          for (let j = i + 1; j < ids.length; j++) {
-            const k = key(ids[i], ids[j]);
-            map[k] = (map[k] || 0) + 1;
-          }
-        }
-      });
-    });
-    return map;
-  }, [data.rounds, editingRoundId]);
+  // Only completed rounds before the selected date; never count the round being edited.
+  const pairCount = useMemo(() => buildPairHistory(data.rounds, {
+    excludedRoundId: editingRoundId, beforeDate: date || null,
+  }), [data.rounds, editingRoundId, date]);
   // 카트 안 ID(정회원 number | 게스트 tempId string)를 실제 members 테이블 ID로 변환. 신규 게스트는 null.
   const resolveMemberId = (id) => {
     if (typeof id === "number") return id;
     const g = guests.find((g) => g.tempId === String(id));
     return g?.realId ?? null;
   };
-  const pairKey = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
   const getPairCount = (a, b) => {
     const ra = resolveMemberId(a);
     const rb = resolveMemberId(b);
@@ -1310,6 +1338,11 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                 </select>
               </div>
               <div style={{ fontSize: 10, color: C.mid, marginBottom: 6 }}>{AUTO_MODES.find((m) => m.id === autoMode)?.desc}</div>
+              {(autoMode === "pair_minimize" || (autoMode === "ab_team" && abHistory)) && (
+                <p style={{ margin: "0 0 8px", fontSize: 10, color: C.mid, lineHeight: 1.6 }}>
+                  {date ? `${date} 이전 ` : ""}완료 라운드의 같은 카트 이력을 반영합니다. 편집 중인 라운드는 제외하며, 같은 카트의 두 사람을 1쌍으로 계산합니다.
+                </p>
+              )}
               {autoMode === "ab_team" && (() => {
                 const teamOfPart = (id) => teamAssign[String(id)] || "A";
                 const teamA = [], teamB = [];
@@ -1354,7 +1387,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                       </label>
                       <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: C.text, cursor: "pointer" }}>
                         <input type="checkbox" checked={abHistory} onChange={(e) => setAbHistory(e.target.checked)} style={{ cursor: "pointer" }} />
-                        매치 히스토리 최소화
+                        같은 카트 이력 최소화
                       </label>
                     </div>
                   </div>

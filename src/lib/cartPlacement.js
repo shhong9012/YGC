@@ -1,3 +1,6 @@
+import { optimizeCartHistory } from "./optimizeCartHistory.js";
+import { summarizePairHistory } from "./pairHistory.js";
+
 const CAPACITY = 4;
 const key = (id) => String(id);
 const sum = (values) => values.reduce((total, value) => total + value, 0);
@@ -225,6 +228,12 @@ export function arrangeCarts({ participants, mode = "cart_avg", fixedCarts = [],
     if (!best) break;
     solution = best;
   }
+  let historyExact = false;
+  if (useHistory) {
+    const optimized = optimizeCartHistory(groups, solution, { cost, ab });
+    solution = optimized.carts;
+    historyExact = optimized.exact;
+  }
   const carts = solution.map((cart, ci) => {
     let people = peopleOf(cart);
     if (ab) people.sort((a, b) => a.team.localeCompare(b.team));
@@ -244,8 +253,11 @@ export function arrangeCarts({ participants, mode = "cart_avg", fixedCarts = [],
   });
   validateCarts(participants, carts, { requireAll: true });
   const nonempty = carts.filter((cart) => cart.length);
+  const pairHistory = useHistory ? summarizePairHistory(carts, getPairCount) : null;
   return {
     carts,
-    notice: `${nonempty.length}개 카트 · ${nonempty.map((cart) => `${cart.length}명`).join(" / ")}${nonempty.length > minimum ? " — 동반 묶음과 수동 배치를 유지하기 위해 카트를 추가했습니다." : ""}`,
+    pairHistory,
+    historyExact,
+    notice: `${nonempty.length}개 카트 · ${nonempty.map((cart) => `${cart.length}명`).join(" / ")}${nonempty.length > minimum ? " — 동반 묶음과 수동 배치를 유지하기 위해 카트를 추가했습니다." : ""}${pairHistory ? ` · 과거 동반 횟수 합 ${pairHistory.total}회 (${pairHistory.repeatedPairs}쌍)` : ""}`,
   };
 }
