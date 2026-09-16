@@ -4,6 +4,7 @@ import { buildPairHistory, pairKey, summarizePairHistory } from "./pairHistory.j
 import { buildPointsMatrix } from "./pointsMatrix.js";
 import { arrangeCarts } from "./cartPlacement.js";
 import { optimizeCartHistory } from "./optimizeCartHistory.js";
+import { getScoreOrderStats } from "./scoreOrder.js";
 
 test("history counts unique pairs once per completed past round, including registered guests", () => {
   const rounds = [
@@ -115,4 +116,24 @@ test("points matrix aligns sparse member histories to shared chronological round
   assert.deepEqual(result.rows[3].cells.map((c) => c.state), ["absent", "absent"]);
   assert.deepEqual(result.rows.map((r) => r.total), [25, 18, 0, 0]);
   assert.deepEqual(buildPointsMatrix([], [], {}), { columns: [], rows: [] });
+});
+
+test("score ordering uses each person's latest valid appearance and actual average", () => {
+  const rounds = [
+    { id: 30, date: "2026-03-17", status: "complete", scores: [{ id: 1, score: 80 }, { id: 2, score: 90 }, { id: "8", score: 100 }] },
+    { id: 10, date: "2026-05-19", status: "complete", scores: [{ id: 1, score: 100 }, { id: 8, score: 90 }] },
+    { id: 40, date: "2026-04-21", status: "complete", scores: [{ id: 1, score: 90 }, { id: 2, score: 0 }, { id: 3, score: null }] },
+    { id: 50, date: "2026-06-16", status: "draft_score", scores: [{ id: 2, score: 65 }] },
+    { id: 60, date: "2026-07-21", status: "complete", scores: [{ id: 1, score: 70 }] },
+  ];
+  const stats = getScoreOrderStats(rounds, { beforeDate: "2026-06-16" });
+  assert.equal(stats[1].recentScore, 100);
+  assert.equal(stats[1].scoringAverage, 90);
+  assert.equal(stats[2].recentScore, 90); // Missing the latest round does not erase this member's score.
+  assert.equal(stats[8].recentScore, 90);
+  assert.equal(stats[8].scoringAverage, 95);
+  assert.equal(stats[3], undefined);
+  const editing = getScoreOrderStats(rounds, { beforeDate: "2026-06-16", excludedRoundId: "10" });
+  assert.equal(editing[1].recentScore, 90);
+  assert.equal(editing[1].scoringAverage, 85);
 });

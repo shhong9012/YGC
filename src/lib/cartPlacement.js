@@ -1,5 +1,6 @@
 import { optimizeCartHistory } from "./optimizeCartHistory.js";
 import { summarizePairHistory } from "./pairHistory.js";
+import { compareByScore } from "./scoreOrder.js";
 
 const CAPACITY = 4;
 const key = (id) => String(id);
@@ -145,6 +146,30 @@ export function arrangeCarts({ participants, mode = "cart_avg", fixedCarts = [],
   const teamSize = (cart, team) => sum(cart.filter((g) => g.team === team).map((g) => g.size));
   if (pinned.some((cart) => sizeOf(cart) > CAPACITY)) throw new Error("수동 배치한 카트에 동반자까지 넣으면 4명을 초과합니다. 자리를 비우거나 동반 묶음을 다른 카트로 옮겨 주세요.");
   if (ab && pinned.some((cart) => teamSize(cart, "A") > 2 || teamSize(cart, "B") > 2)) throw new Error("수동 배치에서 카트별 A/B 인원을 2명 이하로 맞춰 주세요.");
+
+  // Fill cart 1 first, then cart 2, in ascending score order. No balancing swaps.
+  if (mode === "recent_score" || mode === "average_order") {
+    const leader = (group) => group.members.find((p) => p.pairedWith == null) || group.members[0];
+    const ordered = groups.filter((g) => g.fixed == null).sort((a, b) => compareByScore(leader(a), leader(b), mode));
+    const placed = pinned.map((cart) => [...cart]);
+    for (const group of ordered) {
+      let index = placed.findIndex((cart) => sizeOf(cart) + group.size <= CAPACITY);
+      if (index < 0) { index = placed.length; placed.push([]); }
+      placed[index].push(group);
+    }
+    const carts = placed.map((cart, index) => {
+      const fixed = fixedCarts[index] || [];
+      const fixedIds = new Set(fixed.map(key));
+      const remaining = cart.flatMap((g) => g.members).filter((p) => !fixedIds.has(key(p.id)))
+        .sort((a, b) => compareByScore(a, b, mode));
+      return [...fixed, ...remaining.map((p) => p.id)];
+    });
+    validateCarts(participants, carts, { requireAll: true });
+    return {
+      carts,
+      notice: `${mode === "recent_score" ? "최근 스코어순" : "평균 타수순"} · ${carts.filter((cart) => cart.length).length}개 카트 · ${carts.map((cart) => `${cart.length}명`).join(" / ")}`,
+    };
+  }
 
   const useBalance = mode !== "pair_minimize" && (!ab || balance);
   const useHistory = mode === "pair_minimize" || (ab && history);

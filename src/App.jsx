@@ -3,6 +3,7 @@ import { supabase } from "./lib/supabase";
 import { arrangeCarts, seedTeams, validateCarts } from "./lib/cartPlacement";
 import { buildPairHistory, pairKey } from "./lib/pairHistory";
 import { buildPointsMatrix } from "./lib/pointsMatrix";
+import { getScoreOrderStats, rankingValue } from "./lib/scoreOrder";
 
 // ═══ RULES from 정관(251119) ═══
 const F1 = [
@@ -28,6 +29,8 @@ const EXPENSE_CATEGORIES = [
 const EXPENSE_TARGET_MIN = 100000;
 const EXPENSE_TARGET_MAX = 150000;
 const AUTO_MODES = [
+  { id: "recent_score", label: "최근 스코어순", desc: "개인별 가장 최근 타수가 낮은 순서로 1카트부터 4명씩 배치" },
+  { id: "average_order", label: "평균 타수순", desc: "개인별 평균타수가 낮은 순서로 1카트부터 4명씩 배치" },
   { id: "cart_avg", label: "카트별 평균 밸런스", desc: "동반자를 같은 카트에 유지하고, 카트별 인원과 평균타수를 고르게 편성" },
   { id: "seat_balance", label: "앞·뒷자리 밸런스", desc: "카트별 평균을 맞춘 뒤 앞·뒷자리 평균 조정 · 동반 2명은 같은 앞/뒤 좌석 유지" },
   { id: "pair_minimize", label: "같은 카트 이력 최소화", desc: "동반자를 유지하면서 과거 같은 카트였던 조합을 줄임 · 평균타수는 고려하지 않음" },
@@ -904,10 +907,20 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     return pairCount[pairKey(ra, rb)] || 0;
   };
 
+  const scoreOrderStats = useMemo(() => getScoreOrderStats(data.rounds, {
+    excludedRoundId: editingRoundId, beforeDate: date || null,
+  }), [data.rounds, editingRoundId, date]);
+  const scoreOrderMode = autoMode === "recent_score" || autoMode === "average_order";
+  const getOrderScore = (id) => rankingValue(scoreOrderStats[resolveMemberId(id)] || {}, autoMode);
+  const formatOrderScore = (id) => {
+    const value = getOrderScore(id);
+    return Number.isFinite(value) ? `${autoMode === "recent_score" ? "최근" : "평균"} ${Number(value.toFixed(1))}타` : "기록 없음";
+  };
   const getParticipants = () => [
-    ...sel.map((id) => ({ id, name: mm[id]?.name, average: getAvgId(id), team: teamAssign[String(id)] })),
+    ...sel.map((id) => ({ id, name: mm[id]?.name, average: getAvgId(id), ...scoreOrderStats[id], team: teamAssign[String(id)] })),
     ...guests.map((g) => ({
       id: g.tempId, name: g.name, average: getAvgId(g.tempId),
+      ...scoreOrderStats[g.realId],
       pairedWith: g.pairedWith,
       team: teamAssign[String(g.pairedWith ?? g.tempId)],
     })),
@@ -1338,6 +1351,9 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                 </select>
               </div>
               <div style={{ fontSize: 10, color: C.mid, marginBottom: 6 }}>{AUTO_MODES.find((m) => m.id === autoMode)?.desc}</div>
+              {scoreOrderMode && <p style={{ margin: "0 0 8px", fontSize: 10, color: C.mid, lineHeight: 1.6 }}>
+                {date ? `${date} 이전 ` : ""}완료 기록 기준 · 기록이 없으면 뒤쪽에 배치합니다. 동반 묶음은 회원 기준으로, 정원 4명 안에서 함께 배치하므로 순서가 일부 달라질 수 있습니다.
+              </p>}
               {(autoMode === "pair_minimize" || (autoMode === "ab_team" && abHistory)) && (
                 <p style={{ margin: "0 0 8px", fontSize: 10, color: C.mid, lineHeight: 1.6 }}>
                   {date ? `${date} 이전 ` : ""}완료 라운드의 같은 카트 이력을 반영합니다. 편집 중인 라운드는 제외하며, 같은 카트의 두 사람을 1쌍으로 계산합니다.
@@ -1451,7 +1467,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                             return (
                               <div key={id} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, padding: "2px 0", color: isG ? C.purple : C.text, borderTop: isFour && idx === 2 ? `1px dashed ${C.border}` : "none", marginTop: isFour && idx === 2 ? 2 : 0, paddingTop: isFour && idx === 2 ? 4 : 2 }}>
                                 <span style={{ color: C.dim, fontSize: 9 }}>{idx + 1}</span>
-                                <span style={{ flex: 1 }}>{isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name}{pairSum > 0 && <span style={{ color: C.warn, fontSize: 10, marginLeft: 4 }}>🔁{pairSum}</span>}</span>
+                                <span style={{ flex: 1 }}>{isG ? `👤 ${getParticipantName(id)}` : mm[id]?.name}{scoreOrderMode && <span style={{ display: "block", color: C.mid, fontSize: 10 }}>{formatOrderScore(id)}</span>}{pairSum > 0 && <span style={{ color: C.warn, fontSize: 10, marginLeft: 4 }}>🔁{pairSum}</span>}</span>
                                 <button onClick={(e) => { e.stopPropagation(); removeFromCart(id); }}
                                   style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 11, padding: "0 2px" }}>✕</button>
                               </div>
@@ -1485,7 +1501,9 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                             return s + getPairCount(id, other);
                           }, 0);
                           let handi;
-                          if (isG) {
+                          if (scoreOrderMode) {
+                            handi = formatOrderScore(id);
+                          } else if (isG) {
                             const g = guests.find((g) => g.tempId === String(id));
                             handi = g?.realId ? (mm[g.realId]?.avg || g.target || "-") : (g?.target || "-");
                           } else {

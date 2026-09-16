@@ -187,3 +187,41 @@ test("deterministic mixed guest scenarios keep hard constraints in every mode", 
     for (const mode of normalModes) check(participants, arrangeCarts({ participants, mode, getPairCount: (a, b) => (key(a).length + key(b).length) % 4 }));
   }
 });
+
+test("recent and average order fill cart 1 with the four best individual scores", () => {
+  const participants = Array.from({ length: 10 }, (_, i) => ({ ...person(i + 1), recentScore: 80 + i, scoringAverage: 100 - i }));
+  const recent = arrangeCarts({ participants: [...participants].reverse(), mode: "recent_score" });
+  assert.deepEqual(recent.carts, [[1,2,3,4], [5,6,7,8], [9,10]]);
+  const average = arrangeCarts({ participants, mode: "average_order" });
+  assert.deepEqual(average.carts, [[10,9,8,7], [6,5,4,3], [2,1]]);
+  check(participants, recent);
+  check(participants, average);
+});
+
+test("ranked modes put unrecorded attendees last and break ties consistently", () => {
+  const participants = [person(9, 70), { ...person(3), recentScore: 80, scoringAverage: 80 }, { ...person(2), recentScore: 80, scoringAverage: 80 }, { ...person(1), recentScore: 75, scoringAverage: 75 }, person(10, 60)];
+  for (const mode of ["recent_score", "average_order"]) {
+    const result = arrangeCarts({ participants, mode });
+    assert.deepEqual(result.carts, [[1,2,3,9], [10]]); // Targets are not substituted for actual scores.
+  }
+});
+
+test("ranked modes keep companion groups and manual placements without overflow", () => {
+  const participants = [
+    ...Array.from({ length: 7 }, (_, i) => ({ ...person(i + 1), recentScore: 70 + i, scoringAverage: 70 + i })),
+    { ...person("guest_1", 120, 4), recentScore: 120, scoringAverage: 120 },
+  ];
+  for (const mode of ["recent_score", "average_order"]) {
+    const result = arrangeCarts({ participants, mode });
+    check(participants, result);
+    assert.deepEqual(result.carts.map((cart) => cart.length), [4,4]);
+    const fixedCarts = [[7], [4]];
+    const filled = arrangeCarts({ participants, mode, fixedCarts });
+    check(participants, filled);
+    assert.equal(filled.carts[0][0], 7);
+    assert.equal(filled.carts[1][0], 4);
+    assert.ok(filled.carts[1].includes("guest_1"));
+    assert.throws(() => arrangeCarts({ participants, mode, fixedCarts: [[1,2,3,4]] }), /4명을 초과/);
+    assert.throws(() => arrangeCarts({ participants: grouped([5]), mode }), /동반 묶음은 5명/);
+  }
+});
