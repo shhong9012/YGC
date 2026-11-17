@@ -498,10 +498,16 @@ export default function App() {
   // ═══ Computed ═══
   const mm = useMemo(() => {
     const m = {};
+    const completed = data.rounds.filter((r) => r.status === "complete");
     data.members.forEach((mem) => {
       const scores = [];
-      data.rounds.filter((r) => r.status === "complete").forEach((r) => { const s = r.scores?.find((x) => x.id === mem.id); if (s) scores.push(s.score); });
-      m[mem.id] = { ...mem, avg: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10 : null, played: scores.length, scores, bestScore: scores.length ? Math.min(...scores) : null };
+      let visits = 0;
+      completed.forEach((r) => {
+        if (r.attendees?.includes(mem.id)) visits++;
+        const s = r.scores?.find((x) => x.id === mem.id);
+        if (s) scores.push(s.score);
+      });
+      m[mem.id] = { ...mem, visits, avg: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 10) / 10 : null, played: scores.length, scores, bestScore: scores.length ? Math.min(...scores) : null };
     });
     return m;
   }, [data]);
@@ -1304,7 +1310,7 @@ function RoundMgr({ data, db, mm, isAdmin }) {
                   {availableGuests.map((g) => (
                     <button key={g.id} onClick={() => addExistingGuest(g.id)}
                       style={{ padding: "5px 10px", borderRadius: 12, border: `1px dashed ${C.purple}`, background: "transparent", color: C.purple, fontSize: 11, cursor: "pointer" }}>
-                      + {g.name} {mm[g.id]?.avg ? `(avg ${mm[g.id].avg})` : mm[g.id]?.target ? `(목표 ${mm[g.id].target})` : ""}
+                      + {g.name} · 참여 {mm[g.id].visits}회 {mm[g.id]?.avg ? `(avg ${mm[g.id].avg})` : mm[g.id]?.target ? `(목표 ${mm[g.id].target})` : ""}
                     </button>
                   ))}
                 </div>
@@ -1951,8 +1957,9 @@ function MembersMgr({ data, db, mm, isAdmin }) {
                 <div key={m.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", borderRadius: 8, marginBottom: 4, background: C.sf, border: `1px solid ${C.border}` }}>
                   <div style={{ flex: 1 }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color: C.purple }}>👤 {m.name}</span>
+                    <span style={{ marginLeft: 6, fontSize: 11, color: C.text }}>참여 {info.visits}회</span>
                     <span style={{ marginLeft: 6, fontSize: 10, color: C.dim }}>목표 {m.target}타</span>
-                    {info?.avg && <span style={{ marginLeft: 6, fontSize: 10, color: C.mid }}>avg {info.avg} · {info.played}R</span>}
+                    {info?.avg && <span style={{ marginLeft: 6, fontSize: 10, color: C.mid }}>avg {info.avg}</span>}
                     {info?.bestScore && <span style={{ marginLeft: 6, fontSize: 10, color: C.accent }}>best {info.bestScore}</span>}
                   </div>
                   {isAdmin && (
