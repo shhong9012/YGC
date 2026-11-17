@@ -1203,9 +1203,11 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   };
 
   // Past rounds view (shared between admin and viewer)
+  const completedRounds = data.rounds.filter((r) => r.status === "complete")
+    .sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.id - a.id);
   const pastRoundsView = (
-    <Card title="📜 지난 월례회">
-      {[...data.rounds].filter((r) => r.status === "complete").reverse().slice(0, 5).map((r) => {
+    <Card title="📜 지난 월례회" badge={`전체 ${completedRounds.length}회`}>
+      {completedRounds.map((r) => {
         const sorted = r.scores ? [...r.scores].sort((a, b) => a.score - b.score) : [];
         let mRank = 0;
         const ranked = sorted.map((s, i) => {
