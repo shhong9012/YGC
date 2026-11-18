@@ -140,18 +140,47 @@ async function fetchAll() {
 }
 
 // ═══ LOGIN SCREEN ═══
-function LoginScreen() {
+function openGoogleLogin(selectAccount = false) {
+  return supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: {
+      redirectTo: "https://shhong9012.github.io/YGC/",
+      ...(selectAccount ? { queryParams: { prompt: "select_account" } } : {}),
+    },
+  });
+}
+
+function LoginScreen({ checking, accessError, onRetry }) {
+  const [loginError, setLoginError] = useState(false);
+  const startLogin = async () => {
+    setLoginError(false);
+    try {
+      const { error } = await openGoogleLogin(Boolean(accessError));
+      if (error) throw error;
+    } catch {
+      setLoginError(true);
+    }
+  };
+
   return (
     <div style={{ background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Outfit','Noto Sans KR',sans-serif", color: C.text, padding: 20 }}>
       <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
       <div style={{ width: 64, height: 64, borderRadius: 16, background: `linear-gradient(135deg,${C.accent},#059669)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, marginBottom: 16, boxShadow: `0 8px 24px rgba(16,185,129,0.3)` }}>🧢</div>
       <h1 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 800 }}>ㄱㅈㅂ <span style={{ color: C.accent }}>GOLF LEAGUE</span></h1>
       <p style={{ margin: "0 0 32px", fontSize: 12, color: C.dim }}>2026 SEASON · F1 CHAMPIONSHIP</p>
-      <button onClick={() => supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: "https://shhong9012.github.io/YGC/" } })}
+      <button onClick={startLogin}
         style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 28px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.card, color: C.text, fontSize: 14, fontWeight: 600, cursor: "pointer", transition: "all .15s" }}>
         <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#34A853" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#FBBC05" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
         Google로 로그인
       </button>
+      {checking && <p role="status" style={{ color: C.mid, fontSize: 12, marginTop: 14 }}>기존 로그인 확인 중…</p>}
+      {accessError && (
+        <div role="alert" style={{ color: C.mid, fontSize: 12, marginTop: 14, textAlign: "center" }}>
+          <p>로그인 권한을 확인하지 못했어요.</p>
+          <Btn ghost onClick={onRetry} style={{ marginTop: 8 }}>다시 확인</Btn>
+        </div>
+      )}
+      {loginError && <p role="alert" style={{ color: C.red, fontSize: 12, marginTop: 14 }}>Google 로그인을 열지 못했어요. 다시 눌러 주세요.</p>}
     </div>
   );
 }
@@ -166,7 +195,7 @@ function AccessDenied({ email }) {
       <p style={{ margin: "0 0 4px", fontSize: 13, color: C.mid }}>{email}</p>
       <p style={{ margin: "0 0 24px", fontSize: 12, color: C.dim }}>등록된 멤버만 접근할 수 있습니다.<br/>관리자에게 문의하세요.</p>
       <div style={{ display: "flex", gap: 10 }}>
-        <button onClick={() => supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: "https://shhong9012.github.io/YGC/" } })}
+        <button onClick={() => openGoogleLogin(true)}
           style={{ padding: "10px 20px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.card, color: C.text, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
           다른 계정으로 로그인
         </button>
@@ -189,46 +218,47 @@ export default function App() {
 
   // Auth state
   const [session, setSession] = useState(null);
-  const [userRole, setUserRole] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [roleCheck, setRoleCheck] = useState(null);
+  const [roleAttempt, setRoleAttempt] = useState(0);
+  const authEmail = session?.user?.email;
+  const authUserId = session?.user?.id;
 
-  const checkUserRole = useCallback(async (email) => {
-    const { data: row, error } = await supabase
-      .from("allowed_users")
-      .select("role")
-      .eq("email", email)
-      .single();
-    if (error) console.error("allowed_users query:", error.message);
-    return row?.role || null;
-  }, []);
-
-  // Auth listener — session만 추적 (DB 호출 금지)
+  // Supabase emits INITIAL_SESSION after restoring the stored session.
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession(s);
-      if (!s) setAuthLoading(false);
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s);
-      if (!s) { setUserRole(null); setAuthLoading(false); }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      if (!nextSession) setRoleCheck(null);
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
-  // Role 조회 — session 변경 시 별도 effect에서 실행
   useEffect(() => {
-    if (!session?.user?.email) return;
-    checkUserRole(session.user.email).then((role) => {
-      setUserRole(role);
-      setAuthLoading(false);
-    }).catch(() => {
-      setUserRole(null);
-      setAuthLoading(false);
-    });
-  }, [session, checkUserRole]);
+    if (!authEmail || !authUserId) return;
+    let cancelled = false;
+    const identity = { email: authEmail, userId: authUserId, attempt: roleAttempt };
 
+    async function loadRole() {
+      try {
+        const { data: account, error } = await supabase.from("allowed_users")
+          .select("role").eq("email", authEmail).maybeSingle();
+        if (error) throw error;
+        if (!cancelled) setRoleCheck({ ...identity, role: account?.role || null });
+      } catch (error) {
+        if (!cancelled) {
+          console.error("allowed_users query:", error.message);
+          setRoleCheck({ ...identity, error: true });
+        }
+      }
+    }
+
+    loadRole();
+    return () => { cancelled = true; };
+  }, [authEmail, authUserId, roleAttempt]);
+
+  const checkedAccess = roleCheck?.email === authEmail && roleCheck?.userId === authUserId
+    && roleCheck?.attempt === roleAttempt ? roleCheck : null;
+  const userRole = checkedAccess?.role;
   const isAdmin = userRole === "admin";
 
   const refetch = useCallback(async () => {
@@ -559,10 +589,12 @@ export default function App() {
     return att;
   }, [data]);
 
-  // Auth guards
-  if (authLoading) return <div style={{ background: C.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontFamily: "'Outfit', sans-serif" }}>로딩 중...</div>;
+  // Keep sign-in available even if session restoration is still pending.
   if (!session) return <LoginScreen />;
-  if (!userRole) return <AccessDenied email={session.user?.email} />;
+  if (!authEmail || !authUserId) return <AccessDenied email={authEmail} />;
+  if (!checkedAccess) return <LoginScreen checking />;
+  if (checkedAccess.error) return <LoginScreen accessError onRetry={() => setRoleAttempt((attempt) => attempt + 1)} />;
+  if (!userRole) return <AccessDenied email={authEmail} />;
 
   if (!ready) return <div style={{ background: C.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontFamily: "'Outfit', sans-serif" }}>로딩 중...</div>;
 
