@@ -4,6 +4,7 @@ import { arrangeCarts, seedTeams, validateCarts } from "./lib/cartPlacement";
 import { buildPairHistory, pairKey } from "./lib/pairHistory";
 import { buildPointsMatrix } from "./lib/pointsMatrix";
 import { getScoreOrderStats, rankingValue } from "./lib/scoreOrder";
+import { buildAnnualResults, rankRoundScores } from "./lib/annualResults";
 
 // ═══ RULES from 정관(251119) ═══
 const F1 = [
@@ -66,6 +67,7 @@ const fmtW = (n) => `₩${fmt(n)}`;
 const TABS = [
   { id: "standings", label: "챔피언십", icon: "🏆" },
   { id: "round", label: "월례회", icon: "⛳" },
+  { id: "annual", label: "연도별 성적", icon: "📊" },
   { id: "hat", label: "모자", icon: "🧢" },
   { id: "attend", label: "출석", icon: "📋" },
   { id: "dues", label: "회비", icon: "💰" },
@@ -76,12 +78,24 @@ const TABS = [
 ];
 
 // ═══ SUPABASE DATA LAYER ═══
+async function fetchStoredScores() {
+  const pageSize = 500;
+  const scores = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await supabase.from("scores").select("round_id,member_id,score,rank")
+      .order("round_id").order("member_id").range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    scores.push(...data);
+    if (data.length < pageSize) return scores;
+  }
+}
+
 async function fetchAll() {
   const [
     { data: members },
     { data: rounds },
     { data: attendees },
-    { data: scoresData },
+    scoresData,
     { data: cartTeamsData },
     { data: awardsData },
     { data: settingsData },
@@ -90,7 +104,7 @@ async function fetchAll() {
     supabase.from("members").select("*").order("id"),
     supabase.from("rounds").select("*").order("id"),
     supabase.from("round_attendees").select("*"),
-    supabase.from("scores").select("*"),
+    fetchStoredScores(),
     supabase.from("cart_teams").select("*"),
     supabase.from("awards").select("*"),
     supabase.from("settings").select("*"),
@@ -102,7 +116,7 @@ async function fetchAll() {
 
   const roundList = (rounds || []).map((r) => {
     const rAtt = (attendees || []).filter((a) => a.round_id === r.id).map((a) => a.member_id);
-    const rScores = (scoresData || []).filter((s) => s.round_id === r.id).map((s) => ({ id: s.member_id, score: s.score }));
+    const rScores = (scoresData || []).filter((s) => s.round_id === r.id).map((s) => ({ id: s.member_id, score: s.score, rank: s.rank }));
     const rCarts = (cartTeamsData || []).filter((c) => c.round_id === r.id);
     const cartNums = [...new Set(rCarts.map((c) => c.cart_number))].sort((a, b) => a - b);
     const carts = cartNums.map((n) => rCarts.filter((c) => c.cart_number === n).map((c) => c.member_id));
@@ -121,6 +135,7 @@ async function fetchAll() {
     hatHolder: settingsMap.hat_holder ?? null,
     hatSince: settingsMap.hat_since ?? null,
     season: settingsMap.season ? Number(settingsMap.season) : 2026,
+    clubRulesText: typeof settingsMap.club_rules_text === "string" ? settingsMap.club_rules_text : null,
   };
 }
 
@@ -608,13 +623,15 @@ export default function App() {
       <main style={{ maxWidth: 960, margin: "0 auto", padding: "14px 12px" }}>
         {tab === "standings" && <Standings data={data} mm={mm} standings={standings} />}
         {tab === "round" && <RoundMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
+        {tab === "annual" && <AnnualResults data={data} />}
         {tab === "hat" && <HatTracker data={data} mm={mm} />}
         {tab === "attend" && <Attendance data={data} mm={mm} attendance={attendance} />}
         {tab === "dues" && <Dues data={data} db={db} mm={mm} isAdmin={isAdmin} />}
         {tab === "expenses" && <ExpensesMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
         {tab === "gallery" && <Gallery data={data} mm={mm} isAdmin={isAdmin} />}
         {tab === "members" && <MembersMgr data={data} db={db} mm={mm} isAdmin={isAdmin} />}
-        {tab === "rules" && <Rules />}
+        {tab === "rules" && <Rules savedText={data.clubRulesText ?? null} isAdmin={isAdmin}
+          onSaved={(clubRulesText) => setData((current) => ({ ...current, clubRulesText }))} />}
       </main>
     </div>
   );
@@ -644,6 +661,66 @@ function Inp({ label, ...p }) {
 function Medal({ rank }) {
   const m = { 1: "🥇", 2: "🥈", 3: "🥉" };
   return m[rank] ? <span style={{ fontSize: 16 }}>{m[rank]}</span> : <span style={{ fontSize: 12, color: C.dim, fontWeight: 600, minWidth: 22, textAlign: "center", display: "inline-block" }}>{rank}</span>;
+}
+
+function AnnualResults({ data }) {
+  const seasons = useMemo(() => buildAnnualResults(data.rounds, data.members), [data.rounds, data.members]);
+  const [selectedYear, setSelectedYear] = useState("");
+  const season = seasons.find((item) => String(item.year) === selectedYear) || seasons[0];
+  if (!season) return <Card title="연도별 성적"><p style={{ color: C.mid, fontSize: 12 }}>저장된 월례회 성적이 없습니다.</p></Card>;
+
+  return (
+    <Card title="연도별 성적" badge={season.roundCount + "회"}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <label htmlFor="score-year" style={{ color: C.mid, fontSize: 12 }}>연도</label>
+        <select id="score-year" value={season.year} onChange={(event) => setSelectedYear(event.target.value)}
+          style={{ background: C.sf, color: C.text, border: "1px solid " + C.border, borderRadius: 8, padding: "7px 10px" }}>
+          {seasons.map(({ year }) => <option key={year} value={year}>{year}년</option>)}
+        </select>
+      </div>
+      <p style={{ color: C.mid, fontSize: 11, margin: "0 0 14px" }}>
+        완료된 월례회 기준 · 등수는 게스트를 포함한 라운드 전체 순위
+      </p>
+      {[[false, "정회원"], [true, "게스트"]].map(([isGuest, label]) => {
+        const players = season.players.filter((player) => player.isGuest === isGuest);
+        if (players.length === 0) return null;
+        return (
+          <div key={label} style={{ marginTop: 14 }}>
+            <h4 style={{ fontSize: 12, color: C.mid, margin: "0 0 8px" }}>{label} {players.length}명</h4>
+            {players.map((player) => (
+              <details key={season.year + "-" + player.id} style={{ background: C.sf, borderRadius: 8, marginBottom: 5 }}>
+                <summary style={{ cursor: "pointer", padding: "9px 10px", fontSize: 12 }}>
+                  <span style={{ display: "inline-flex", alignItems: "baseline", flexWrap: "wrap", gap: "3px 10px", verticalAlign: "middle", marginLeft: 4 }}>
+                    <strong>{player.name}</strong>
+                    <span style={{ color: C.accent }}>평균 {player.avgScore.toFixed(1)}타</span>
+                    <span style={{ color: C.text }}>평균 {player.avgRank.toFixed(1)}위</span>
+                    <span style={{ color: C.mid }}>{player.results.length}회</span>
+                  </span>
+                </summary>
+                <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: 11 }}>
+                  <thead style={{ color: C.mid }}>
+                    <tr><th style={{ padding: "5px 10px" }}>월례회</th><th style={{ width: 52 }}>타수</th><th style={{ width: 52 }}>등수</th></tr>
+                  </thead>
+                  <tbody>
+                    {player.results.map((result) => (
+                      <tr key={result.roundId} style={{ borderTop: "1px solid " + C.border }}>
+                        <td style={{ padding: "7px 10px" }}>
+                          <div>R{result.roundId} · {result.date}</div>
+                          {result.course && <div style={{ color: C.mid }}>{result.course}</div>}
+                        </td>
+                        <td>{result.score}타</td>
+                        <td>{result.rank}위</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </details>
+            ))}
+          </div>
+        );
+      })}
+    </Card>
+  );
 }
 
 // ═══ CHAMPIONSHIP STANDINGS ═══
@@ -849,7 +926,11 @@ function RoundMgr({ data, db, mm, isAdmin }) {
     else if (round.status === "draft_score") setStep(3);
     else if (round.status === "complete") setStep(2); // 완료된 라운드 편집 → 스코어부터
     else setStep(1);
-    setTieBreaks({});
+    const savedOrder = {};
+    for (const entry of rankRoundScores(round.scores)) {
+      (savedOrder[entry.score] ||= []).push(String(entry.id));
+    }
+    setTieBreaks(savedOrder);
     setTeamAssign({});
   };
 
@@ -1214,12 +1295,12 @@ function RoundMgr({ data, db, mm, isAdmin }) {
   const pastRoundsView = (
     <Card title="📜 지난 월례회" badge={`전체 ${completedRounds.length}회`}>
       {completedRounds.map((r) => {
-        const sorted = r.scores ? [...r.scores].sort((a, b) => a.score - b.score) : [];
+        const sorted = rankRoundScores(r.scores);
         let mRank = 0;
-        const ranked = sorted.map((s, i) => {
+        const ranked = sorted.map((s) => {
           const isG = mm[s.id]?.isGuest;
           if (!isG) mRank++;
-          return { ...s, overallRank: i + 1, pts: isG ? 0 : getPts(mRank) };
+          return { ...s, overallRank: s.rank, pts: isG ? 0 : getPts(mRank) };
         });
         return (
           <div key={r.id} style={{ padding: 10, background: C.sf, borderRadius: 8, marginBottom: 6, border: `1px solid ${C.border}` }}>
@@ -1886,6 +1967,80 @@ function Dues({ data, db, mm, isAdmin }) {
 }
 
 // ═══ MEMBERS ═══
+function siteAdminError(error) {
+  if (error.code === "PGRST202") return "Supabase에서 사이트 관리 기능을 먼저 설정해 주세요.";
+  if (error.code === "42501") return "현재 계정에 관리자 권한이 없습니다.";
+  return error.message || "서버에서 요청을 처리하지 못했습니다.";
+}
+
+function AccountAccess() {
+  const [accounts, setAccounts] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const refresh = async () => {
+    setBusy(true);
+    setError("");
+    const response = await supabase.rpc("ygc_admin_list_accounts");
+    if (response.error) setError(siteAdminError(response.error));
+    else setAccounts(response.data || []);
+    setBusy(false);
+  };
+
+  const grant = async (rawEmail) => {
+    const target = rawEmail.trim().toLowerCase();
+    if (!target || busy || !confirm(target + " 계정에 관리자 권한을 부여할까요?")) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    const { error: grantError } = await supabase.rpc("ygc_admin_assign_account", { p_email: target });
+    if (grantError) {
+      setError(siteAdminError(grantError));
+      setBusy(false);
+      return;
+    }
+    setEmail("");
+    setMessage(target + " 계정을 관리자로 지정했어요. 이미 로그인 중이면 새로고침하면 됩니다.");
+    await refresh();
+  };
+
+  return (
+    <Card title="관리자 지정">
+      {!expanded ? (
+        <Btn ghost onClick={() => { setExpanded(true); refresh(); }}>로그인 계정 관리</Btn>
+      ) : (
+        <>
+          <form onSubmit={(event) => { event.preventDefault(); grant(email); }}
+            style={{ display: "flex", alignItems: "end", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            <div style={{ flex: "1 1 180px" }}>
+              <label htmlFor="admin-email" style={{ display: "block", color: C.mid, fontSize: 11, marginBottom: 3 }}>관리자로 지정할 Google 이메일</label>
+              <Inp id="admin-email" type="email" required maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)} disabled={busy || !accounts} />
+            </div>
+            <button type="submit" disabled={busy || !accounts || !email.trim()}
+              style={{ padding: "8px 12px", background: C.accentDim, color: C.accent, border: "1px solid " + C.border, borderRadius: 8, fontSize: 12, cursor: "pointer" }}>
+              지정
+            </button>
+          </form>
+          {busy && <p role="status" style={{ fontSize: 11, color: C.mid }}>처리 중…</p>}
+          {error && <p role="alert" style={{ fontSize: 11, color: C.red }}>{error}</p>}
+          {error && !accounts && <Btn ghost onClick={refresh} disabled={busy}>다시 불러오기</Btn>}
+          {message && <p role="status" style={{ fontSize: 11, color: C.accent }}>{message}</p>}
+          {accounts?.map((account) => (
+            <div key={account.email} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderTop: "1px solid " + C.border }}>
+              <span style={{ fontSize: 12, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{account.email}</span>
+              {account.role === "admin" ? <span style={{ color: C.gold, fontSize: 11 }}>관리자</span>
+                : <Btn ghost disabled={busy} onClick={() => grant(account.email)}>관리자 지정</Btn>}
+            </div>
+          ))}
+        </>
+      )}
+    </Card>
+  );
+}
+
 function MembersMgr({ data, db, mm, isAdmin }) {
   const [name, setName] = useState(""); const [tgt, setTgt] = useState("");
   const [editId, setEditId] = useState(null); const [editTgt, setEditTgt] = useState("");
@@ -1915,6 +2070,7 @@ function MembersMgr({ data, db, mm, isAdmin }) {
           </div>
         </Card>
       )}
+      {isAdmin && <AccountAccess />}
       <Card title={`멤버 목록`} badge={`${data.members.filter((m) => !m.isGuest).length}명`}>
         {data.members.filter((m) => !m.isGuest).map((m) => {
           const info = mm[m.id];
@@ -2144,37 +2300,83 @@ function ExpensesMgr({ data, db, mm, isAdmin }) {
 }
 
 // ═══ RULES SUMMARY ═══
-function Rules() {
+const RULES_SOURCE = "https://1drv.ms/x/c/7d8070ffc987d942/IQDM2qKSgD79TKp70JgUh_4mAf1QLoquzMsnH4ki6zzm4eg?e=NgbecU";
+
+function Rules({ savedText, isAdmin, onSaved }) {
   const rules = [
-    { id: "제1조", title: "ㄱㅈㅂ 모자", desc: "월례회 꼴찌가 보유. 26년부터 노핸디." },
-    { id: "제5조", title: "멀리건 혜택", desc: "모자 착용 시 원하는 홀에서 멀리건 1회." },
-    { id: "제6조", title: "동기부여", desc: "인당 150만원 회비. 목표타수 달성 시 50만원 수령." },
-    { id: "제7조", title: "인원구성", desc: "탈퇴 자유, 단 목표 미달성 시 납입금 불가." },
-    { id: "제9조", title: "월례회", desc: "매월 셋째 화요일 오후 태광CC. 회비 150만원." },
-    { id: "제10조", title: "출석", desc: "3~6, 8~11월 총 8회 중 5회 이상 참석 필수." },
-    { id: "제11조", title: "F1 포인트", desc: "1위 25 / 2위 18 / 3위 15 / 4위 12 / 5위 10 / 6위 8pts. 연말 합산." },
-    { id: "제12조", title: "카트배", desc: "전월 핸디별 카트 밸런스 편성. 카트 1,2등 포상." },
-    { id: "제13조", title: "챔피언", desc: "연말 포인트 1위 = 챔피언 모자. 챔피언이 다음해 총무." },
-    { id: "제14조", title: "기타 상품", desc: "롱기, 니어, 행운상 등 회비 고려 적정 포상." },
-    { id: "게임룰", title: "게임룰", desc: "NO멀리건 / OB말뚝=죽음 / 자연장애물 빼기 1벌타 / 컨시드=홀컵+먹갈치 / 클럽 14개" },
+    ["제1조 ㄱㅈㅂ 모자", "월례회 꼴찌가 보유. 26년부터 노핸디."],
+    ["제5조 멀리건 혜택", "모자 착용 시 원하는 홀에서 멀리건 1회."],
+    ["제6조 동기부여", "인당 150만원 회비. 목표타수 달성 시 50만원 수령."],
+    ["제7조 인원구성", "탈퇴 자유, 단 목표 미달성 시 납입금 불가."],
+    ["제9조 월례회", "매월 셋째 화요일 오후 태광CC. 회비 150만원."],
+    ["제10조 출석", "3~6, 8~11월 총 8회 중 5회 이상 참석 필수."],
+    ["제11조 F1 포인트", "1위 25 / 2위 18 / 3위 15 / 4위 12 / 5위 10 / 6위 8pts. 연말 합산."],
+    ["제12조 카트배", "전월 핸디별 카트 밸런스 편성. 카트 1,2등 포상."],
+    ["제13조 챔피언", "연말 포인트 1위 = 챔피언 모자. 챔피언이 다음해 총무."],
+    ["제14조 기타 상품", "롱기, 니어, 행운상 등 회비 고려 적정 포상."],
+    ["게임룰", "NO멀리건 / OB말뚝=죽음 / 자연장애물 빼기 1벌타 / 컨시드=홀컵+먹갈치 / 클럽 14개"],
+    ["2026년 목표타수", "문민구 75이하 / 조동훈·이민규 80이하 / 이희진·최영근·홍석환·최성현·김산·강석훈 85이하 / 박시환·박인혁 90미만 / 송영섭·장주홍·정승윤 95미만"],
   ];
+  const defaultText = rules.map(([title, body]) => title + "\n" + body).join("\n\n");
+  const text = savedText ?? defaultText;
+  const [edit, setEdit] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const save = async () => {
+    const content = edit.content.trim();
+    if (!content || saving) return;
+    setSaving(true);
+    setError("");
+    const { error: saveError } = await supabase.rpc("ygc_save_club_rules", {
+      p_content: content, p_previous: edit.previous,
+    });
+    setSaving(false);
+    if (saveError) {
+      setError(saveError.code === "40001" ? "다른 관리자가 먼저 저장했어요. 작성 내용을 복사한 뒤 새로고침해서 다시 편집해 주세요." : siteAdminError(saveError));
+      return;
+    }
+    onSaved(content);
+    setEdit(null);
+    setSaved(true);
+  };
+
   return (
-    <Card title="📜 ㄱㅈㅂ GOLF 정관 요약 (251119 기준)">
-      {rules.map((r) => (
-        <div key={r.id} style={{ padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-            <span style={{ fontSize: 10, color: C.accent, fontWeight: 700, minWidth: 44 }}>{r.id}</span>
-            <span style={{ fontSize: 12, fontWeight: 600 }}>{r.title}</span>
-          </div>
-          <p style={{ margin: "3px 0 0 52px", fontSize: 11, color: C.mid, lineHeight: 1.5 }}>{r.desc}</p>
-        </div>
-      ))}
-      <div style={{ marginTop: 12, padding: 10, background: C.sf, borderRadius: 8 }}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: C.gold, marginBottom: 6 }}>🎯 2026년 목표타수</div>
-        <div style={{ fontSize: 10, color: C.mid, lineHeight: 1.8 }}>
-          문민구 75이하 / 조동훈·이민규 80이하 / 이희진·최영근·홍석환·최성현·김산·강석훈 85이하 / 박시환·박인혁 90미만 / 송영섭·장주홍·정승윤 95미만
-        </div>
+    <Card title="ㄱㅈㅂ GOLF 정관" badge={savedText === null ? "2025.11.19 요약" : undefined}>
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <a href={RULES_SOURCE} target="_blank" rel="noreferrer" style={{ color: C.accent, fontSize: 12 }}>
+          OneDrive 정관 원본 ↗
+        </a>
+        {isAdmin && !edit && <Btn ghost onClick={() => { setSaved(false); setError(""); setEdit({ content: text, previous: savedText }); }}>정관 수정</Btn>}
       </div>
+      {isAdmin && edit ? (
+        <>
+          <label htmlFor="club-rules-text" style={{ display: "block", color: C.mid, fontSize: 12, marginBottom: 5 }}>정관 본문</label>
+          <textarea id="club-rules-text" value={edit.content} maxLength={50000} rows={16} disabled={saving}
+            onChange={(event) => setEdit({ ...edit, content: event.target.value })}
+            style={{ width: "100%", padding: 10, background: C.sf, color: C.text, border: "1px solid " + C.border, borderRadius: 8, fontFamily: "inherit", fontSize: 13, lineHeight: 1.6, resize: "vertical" }} />
+          <p style={{ fontSize: 11, color: C.mid, margin: "5px 0 9px" }}>이 페이지의 본문만 수정합니다. 챔피언십 계산과 회비 설정은 유지됩니다.</p>
+          {error && <p role="alert" style={{ color: C.red, fontSize: 12 }}>{error}</p>}
+          <div style={{ display: "flex", gap: 6 }}>
+            <Btn disabled={saving || !edit.content.trim()} onClick={save}>{saving ? "저장 중…" : "저장"}</Btn>
+            <Btn ghost disabled={saving} onClick={() => { setEdit(null); setError(""); }}>취소</Btn>
+          </div>
+        </>
+      ) : (
+        <>
+          {saved && <p role="status" style={{ color: C.accent, fontSize: 12 }}>정관을 저장했어요.</p>}
+          {text.split(/\n{2,}/).map((section, index) => {
+            const [title, ...body] = section.split("\n");
+            return (
+              <div key={index} style={{ padding: "8px 0", borderBottom: "1px solid " + C.border, overflowWrap: "anywhere" }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{title}</div>
+                {body.length > 0 && <p style={{ margin: "3px 0 0", fontSize: 12, color: C.mid, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{body.join("\n")}</p>}
+              </div>
+            );
+          })}
+        </>
+      )}
     </Card>
   );
 }

@@ -1,3 +1,4 @@
+import { buildAnnualResults } from "./annualResults.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildPairHistory, pairKey, summarizePairHistory } from "./pairHistory.js";
@@ -136,4 +137,27 @@ test("score ordering uses each person's latest valid appearance and actual avera
   const editing = getScoreOrderStats(rounds, { beforeDate: "2026-06-16", excludedRoundId: "10" });
   assert.equal(editing[1].recentScore, 90);
   assert.equal(editing[1].scoringAverage, 85);
+});
+
+test("annual score history uses completed rounds, persisted tie breaks, and per-year averages", () => {
+  const members = [{ id: 1, name: "A" }, { id: 2, name: "B", isGuest: true }];
+  const rounds = [
+    { id: 15, date: "2026-05-19", status: "complete", scores: [{ id: 1, score: 90, rank: 2 }, { id: "2", score: 90, rank: 1 }] },
+    { id: 13, date: "2026-03-17", status: "complete", scores: [{ id: 1, score: "96" }, { id: 2, score: 96 }, { id: 3, score: 0 }] },
+    { id: 14, date: "2026-04-21", status: "draft_score", scores: [{ id: 1, score: 70, rank: 1 }] },
+    { id: 10, date: "2025-11-19", status: "complete", scores: [{ id: 1, score: 103, rank: 1 }] },
+  ];
+  const [current, past] = buildAnnualResults(rounds, members);
+  assert.equal(current.year, 2026);
+  assert.equal(current.roundCount, 2);
+  assert.equal(current.players.length, 2);
+  const member = current.players.find((player) => player.id === "1");
+  const guest = current.players.find((player) => player.id === "2");
+  assert.equal(member.avgScore, 93);
+  assert.equal(member.avgRank, 1.5);
+  assert.deepEqual(member.results.map(({ roundId, rank }) => [roundId, rank]), [[15, 2], [13, 1]]);
+  assert.equal(guest.isGuest, true);
+  assert.equal(guest.avgRank, 1);
+  assert.equal(past.year, 2025);
+  assert.equal(past.players[0].avgScore, 103);
 });
