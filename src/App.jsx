@@ -2300,8 +2300,6 @@ function ExpensesMgr({ data, db, mm, isAdmin }) {
 }
 
 // ═══ RULES SUMMARY ═══
-const RULES_SOURCE = "https://1drv.ms/x/c/7d8070ffc987d942/IQDM2qKSgD79TKp70JgUh_4mAf1QLoquzMsnH4ki6zzm4eg?e=NgbecU";
-
 function Rules({ savedText, isAdmin, onSaved }) {
   const rules = [
     ["제1조 ㄱㅈㅂ 모자", "월례회 꼴찌가 보유. 26년부터 노핸디."],
@@ -2318,7 +2316,19 @@ function Rules({ savedText, isAdmin, onSaved }) {
     ["2026년 목표타수", "문민구 75이하 / 조동훈·이민규 80이하 / 이희진·최영근·홍석환·최성현·김산·강석훈 85이하 / 박시환·박인혁 90미만 / 송영섭·장주홍·정승윤 95미만"],
   ];
   const defaultText = rules.map(([title, body]) => title + "\n" + body).join("\n\n");
-  const text = savedText ?? defaultText;
+  let text = savedText ?? defaultText;
+  let sourceUrl = "";
+  try {
+    const document = JSON.parse(savedText);
+    if (document?.version === 1 && typeof document.text === "string") {
+      text = document.text;
+      if (typeof document.sourceUrl === "string" && new URL(document.sourceUrl).protocol === "https:") {
+        sourceUrl = document.sourceUrl;
+      }
+    }
+  } catch {
+    // Existing entries may be plain text or have no valid original document link.
+  }
   const [edit, setEdit] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -2327,17 +2337,31 @@ function Rules({ savedText, isAdmin, onSaved }) {
   const save = async () => {
     const content = edit.content.trim();
     if (!content || saving) return;
+    const link = edit.sourceUrl.trim();
+    if (link) {
+      try {
+        if (new URL(link).protocol !== "https:") throw new Error("Invalid scheme");
+      } catch {
+        setError("원본 주소는 https://로 시작하는 링크로 입력해 주세요.");
+        return;
+      }
+    }
+    const stored = link ? JSON.stringify({ version: 1, text: content, sourceUrl: link }) : content;
+    if (stored.length > 50000) {
+      setError("정관과 원본 주소가 너무 길어요. 길이를 줄여 주세요.");
+      return;
+    }
     setSaving(true);
     setError("");
     const { error: saveError } = await supabase.rpc("ygc_save_club_rules", {
-      p_content: content, p_previous: edit.previous,
+      p_content: stored, p_previous: edit.previous,
     });
     setSaving(false);
     if (saveError) {
       setError(saveError.code === "40001" ? "다른 관리자가 먼저 저장했어요. 작성 내용을 복사한 뒤 새로고침해서 다시 편집해 주세요." : siteAdminError(saveError));
       return;
     }
-    onSaved(content);
+    onSaved(stored);
     setEdit(null);
     setSaved(true);
   };
@@ -2345,13 +2369,16 @@ function Rules({ savedText, isAdmin, onSaved }) {
   return (
     <Card title="ㄱㅈㅂ GOLF 정관" badge={savedText === null ? "2025.11.19 요약" : undefined}>
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 12 }}>
-        <a href={RULES_SOURCE} target="_blank" rel="noreferrer" style={{ color: C.accent, fontSize: 12 }}>
-          OneDrive 정관 원본 ↗
-        </a>
-        {isAdmin && !edit && <Btn ghost onClick={() => { setSaved(false); setError(""); setEdit({ content: text, previous: savedText }); }}>정관 수정</Btn>}
+        {sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer" style={{ color: C.accent, fontSize: 12 }}>
+          정관 원본 ↗
+        </a>}
+        {isAdmin && !edit && <Btn ghost onClick={() => { setSaved(false); setError(""); setEdit({ content: text, sourceUrl, previous: savedText }); }}>정관 수정</Btn>}
       </div>
       {isAdmin && edit ? (
         <>
+          <label htmlFor="club-rules-source" style={{ display: "block", color: C.mid, fontSize: 12, marginBottom: 5 }}>OneDrive 원본 주소 (선택)</label>
+          <Inp id="club-rules-source" type="url" value={edit.sourceUrl} maxLength={2048} disabled={saving}
+            onChange={(event) => setEdit({ ...edit, sourceUrl: event.target.value })} style={{ marginBottom: 10 }} />
           <label htmlFor="club-rules-text" style={{ display: "block", color: C.mid, fontSize: 12, marginBottom: 5 }}>정관 본문</label>
           <textarea id="club-rules-text" value={edit.content} maxLength={50000} rows={16} disabled={saving}
             onChange={(event) => setEdit({ ...edit, content: event.target.value })}
